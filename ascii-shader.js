@@ -86,22 +86,19 @@ export const AsciiShader = {
 
       // ~0.3% of cells slowly cycle their character variant
       // hash2 selects which cells cycle; time drives the animation
-      int variant;
+      int variant = int(hash * 3.0);
       if (hash2 > 0.997) {
-        // Rare cycling cell: smoothly rotates through variants
         variant = int(mod(floor(time * 8.0 + hash * 20.0), 3.0));
-      } else {
-        variant = int(hash * 3.0); // stable per-cell pick
       }
 
       // Pick character with per-cell variance
       // Each density level has 3 character options
       int n = 0;
       if (ink > 0.05) {
-        // sparse: . , `
+        // sparse: . , '
         if (variant == 0) n = 4096;       // .
         else if (variant == 1) n = 8192;   // ,
-        else n = 16384;                    // `
+        else n = 16384;                    // '
       }
       if (ink > 0.12) {
         // light: : ; -
