@@ -1,8 +1,7 @@
 /**
  * ASCII Art Post-Processing Shader for Babel
  *
- * Edge-detection based: draws black outlines on white background.
- * Combines Sobel edge detection with subtle ASCII fill for depth.
+ * Edge-detection + luminance shading, black ink on white paper.
  * Per-cell character variance with rare cycling cells.
  */
 
@@ -25,124 +24,93 @@ export const AsciiShader = {
 
     varying vec2 vUv;
 
-    float luminance(vec3 c) {
-      return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float luma(vec3 c) {
+      return dot(c, vec3(0.299, 0.587, 0.114));
     }
 
-    // Simple hash for per-cell randomness
-    float hash21(vec2 p) {
+    float rand(vec2 p) {
       return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
     }
 
-    // Sobel edge detection
-    float edgeDetect(vec2 uv) {
-      vec2 texel = 1.0 / resolution;
-
-      float tl = luminance(texture2D(tDiffuse, uv + vec2(-texel.x, texel.y)).rgb);
-      float tm = luminance(texture2D(tDiffuse, uv + vec2(0.0, texel.y)).rgb);
-      float tr = luminance(texture2D(tDiffuse, uv + vec2(texel.x, texel.y)).rgb);
-      float ml = luminance(texture2D(tDiffuse, uv + vec2(-texel.x, 0.0)).rgb);
-      float mr = luminance(texture2D(tDiffuse, uv + vec2(texel.x, 0.0)).rgb);
-      float bl = luminance(texture2D(tDiffuse, uv + vec2(-texel.x, -texel.y)).rgb);
-      float bm = luminance(texture2D(tDiffuse, uv + vec2(0.0, -texel.y)).rgb);
-      float br = luminance(texture2D(tDiffuse, uv + vec2(texel.x, -texel.y)).rgb);
-
+    float sobel(vec2 uv) {
+      vec2 t = 1.0 / resolution;
+      float tl = luma(texture2D(tDiffuse, uv + vec2(-t.x, t.y)).rgb);
+      float tm = luma(texture2D(tDiffuse, uv + vec2(0.0, t.y)).rgb);
+      float tr = luma(texture2D(tDiffuse, uv + vec2(t.x, t.y)).rgb);
+      float ml = luma(texture2D(tDiffuse, uv + vec2(-t.x, 0.0)).rgb);
+      float mr = luma(texture2D(tDiffuse, uv + vec2(t.x, 0.0)).rgb);
+      float bl = luma(texture2D(tDiffuse, uv + vec2(-t.x, -t.y)).rgb);
+      float bm = luma(texture2D(tDiffuse, uv + vec2(0.0, -t.y)).rgb);
+      float br = luma(texture2D(tDiffuse, uv + vec2(t.x, -t.y)).rgb);
       float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
       float gy = -tl - 2.0*tm - tr + bl + 2.0*bm + br;
-
-      return sqrt(gx * gx + gy * gy);
-    }
-
-    // Render a character cell as filled or empty based on density
-    // Uses procedural pattern instead of bitmap lookup for compatibility
-    float charPattern(float density, vec2 p, float variant) {
-      // p is 0..1 within the cell
-      // density 0..1 controls how much of the cell is filled
-      // variant adds per-cell uniqueness
-
-      if (density < 0.02) return 0.0; // blank
-
-      // Dot pattern: more dots = denser character
-      float px = p.x;
-      float py = p.y;
-
-      // Center dot (appears at low density)
-      float d = length(p - vec2(0.5)) * 2.0;
-      float dots = step(d, density * 0.6);
-
-      // Cross pattern at medium density
-      if (density > 0.25) {
-        float cross = step(abs(px - 0.5), 0.12) * step(abs(py - 0.5), density * 0.4);
-        cross += step(abs(py - 0.5), 0.12) * step(abs(px - 0.5), density * 0.4);
-        dots = max(dots, min(cross, 1.0));
-      }
-
-      // Grid fill at high density
-      if (density > 0.5) {
-        // Variant shifts the pattern
-        float offset = variant * 0.15;
-        float gx = step(0.5, fract(px * (2.0 + density * 3.0) + offset));
-        float gy = step(0.5, fract(py * (2.0 + density * 3.0) + offset * 1.3));
-        float grid = gx * gy;
-        dots = max(dots, grid * density);
-      }
-
-      // Solid fill at very high density
-      if (density > 0.85) {
-        dots = max(dots, step(0.1, density));
-      }
-
-      return clamp(dots, 0.0, 1.0);
+      return length(vec2(gx, gy));
     }
 
     void main() {
       vec2 pix = gl_FragCoord.xy;
-      vec2 cell = floor(pix / charSize) * charSize;
-      vec2 cellCenter = (cell + charSize * 0.5) / resolution;
-
-      vec4 texel = texture2D(tDiffuse, cellCenter);
-      float lum = luminance(texel.rgb);
-
-      // Edge detection
-      float edge = 0.0;
-      vec2 texelSize = 1.0 / resolution;
-      edge += edgeDetect(cellCenter);
-      edge += edgeDetect(cellCenter + vec2(texelSize.x, 0.0));
-      edge += edgeDetect(cellCenter + vec2(0.0, texelSize.y));
-      edge /= 3.0;
-      edge = smoothstep(0.05, 0.25, edge);
-
-      // Subtle shading for dark areas
-      float shade = 1.0 - smoothstep(0.0, 0.5, lum);
-      shade *= 0.3;
-
-      // Combine
-      float ink = max(edge, shade);
-
-      // Per-cell hash for variance
       vec2 cellId = floor(pix / charSize);
-      float h1 = hash21(cellId);
-      float h2 = hash21(cellId + vec2(73.0, 157.0));
+      vec2 cellCenter = (cellId * charSize + charSize * 0.5) / resolution;
+      vec2 p = fract(pix / charSize); // 0..1 within cell
 
-      // ~0.3% of cells cycle rapidly
-      float variant = h1;
+      // Sample scene
+      float l = luma(texture2D(tDiffuse, cellCenter).rgb);
+
+      // Edge strength
+      float edge = sobel(cellCenter);
+      edge = smoothstep(0.04, 0.2, edge);
+
+      // Luminance-based fill (bright scene areas = more ink on white paper)
+      float fill = smoothstep(0.02, 0.8, l) * 0.5;
+
+      // Total ink
+      float ink = clamp(edge + fill, 0.0, 1.0);
+
+      // Per-cell variance
+      float h = rand(cellId);
+      float h2 = rand(cellId + 73.0);
+
+      // Rare fast-cycling cells
+      float vary = h;
       if (h2 > 0.997) {
-        variant = fract(time * 8.0 + h1 * 20.0);
+        vary = fract(time * 8.0 + h * 20.0);
       }
 
-      // Render character pattern
-      vec2 p = mod(pix, charSize) / charSize;
-      float c = charPattern(ink, p, variant);
+      // Procedural character pattern within the cell
+      float c = 0.0;
+
+      // Center dot
+      float dot1 = 1.0 - smoothstep(0.0, 0.2 + ink * 0.3, length(p - 0.5));
+      c = dot1 * step(0.05, ink);
+
+      // Add cross arms at higher ink
+      if (ink > 0.3) {
+        float cross1 = step(abs(p.x - 0.5), 0.1) * step(abs(p.y - 0.5), ink * 0.45);
+        float cross2 = step(abs(p.y - 0.5), 0.1) * step(abs(p.x - 0.5), ink * 0.45);
+        c = max(c, (cross1 + cross2) * ink);
+      }
+
+      // Add diagonal strokes at higher ink, offset by variance
+      if (ink > 0.5) {
+        float d1 = abs((p.x - 0.5) - (p.y - 0.5 + vary * 0.1));
+        float d2 = abs((p.x - 0.5) + (p.y - 0.5 - vary * 0.1));
+        float diag = step(d1, 0.08) + step(d2, 0.08);
+        c = max(c, diag * (ink - 0.3));
+      }
+
+      // Near-solid fill at high ink
+      if (ink > 0.8) {
+        c = max(c, ink);
+      }
+
+      c = clamp(c, 0.0, 1.0);
 
       // Black ink on white paper
-      vec3 paper = vec3(1.0, 0.99, 0.97);
-      vec3 inkColor = vec3(0.0, 0.0, 0.0);
-      vec3 col = mix(paper, inkColor, c);
+      vec3 col = vec3(1.0 - c * 0.95);
 
-      // Subtle vignette
-      vec2 uv = gl_FragCoord.xy / resolution;
-      float vig = 1.0 - 0.12 * length((uv - 0.5) * 1.6);
-      col *= vig;
+      // Vignette
+      vec2 uv = pix / resolution;
+      col *= 1.0 - 0.1 * length((uv - 0.5) * 1.5);
 
       gl_FragColor = vec4(col, 1.0);
     }

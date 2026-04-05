@@ -52,10 +52,10 @@ function init() {
   state.renderer.setClearColor(0x000000);
   document.body.appendChild(state.renderer.domElement);
 
-  // Scene — black background (shader inverts to white paper)
+  // Scene — dark background, shader renders as black-on-white
   state.scene = new THREE.Scene();
-  state.scene.background = new THREE.Color(0xffffff);
-  state.scene.fog = new THREE.Fog(0xffffff, 80, 300);
+  state.scene.background = new THREE.Color(0x000000);
+  state.scene.fog = new THREE.FogExp2(0x000000, 0.005);
 
   // Camera
   state.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
@@ -134,13 +134,13 @@ function buildTower(numFloors) {
   const towerGroup = new THREE.Group();
   state.towerGroup = towerGroup;
 
-  const stoneMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
-  const darkStoneMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
-  const edgeMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+  const stoneMat = new THREE.MeshLambertMaterial({ color: 0x998877 });
+  const darkStoneMat = new THREE.MeshLambertMaterial({ color: 0x776655 });
+  const edgeMat = new THREE.MeshLambertMaterial({ color: 0x887766 });
 
-  // Ground — dark to form clear horizon line
+  // Ground
   const groundGeo = new THREE.PlaneGeometry(500, 500);
-  const groundMat = new THREE.MeshLambertMaterial({ color: 0x444444 });
+  const groundMat = new THREE.MeshLambertMaterial({ color: 0x665544 });
   const ground = new THREE.Mesh(groundGeo, groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.5;
@@ -239,8 +239,7 @@ function buildTower(numFloors) {
 
 // ─── Lighting ────────────────────────────────────────────────────────
 function setupLighting() {
-  // Low ambient for strong contrast
-  const ambient = new THREE.AmbientLight(0xffffff, 0.15);
+  const ambient = new THREE.AmbientLight(0xffffff, 0.5);
   state.scene.add(ambient);
 
   // Strong directional from above-right for clear shadows
