@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { AsciiShader, createCharAtlas, SHADER_UNIFORMS_EXTRA } from './ascii-shader.js';
+import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
 import { NetworkClient } from './client/network.js';
 import { PlayerManager } from './client/players.js';
 import { ChatUI } from './client/chat.js';
@@ -106,18 +106,20 @@ function setupAsciiPostProcessing() {
     format: THREE.RGBAFormat,
   });
 
-  // Create character atlas texture
-  const charAtlas = createCharAtlas(THREE, ASCII_CHAR_SIZE);
+  // Rectangular cells: 8 wide x 14 tall (matches monospace proportions)
+  const cellW = 8;
+  const cellH = 14;
+  const charAtlas = createCharAtlas(THREE, cellW, cellH);
 
   state.asciiMaterial = new THREE.ShaderMaterial({
     uniforms: {
       tDiffuse: { value: state.renderTarget.texture },
       tAtlas: { value: charAtlas },
       resolution: { value: new THREE.Vector2(w, h) },
-      charSize: { value: ASCII_CHAR_SIZE },
+      cellSize: { value: new THREE.Vector2(cellW, cellH) },
       time: { value: 0.0 },
-      atlasSize: { value: new THREE.Vector2(SHADER_UNIFORMS_EXTRA.atlasSize.value[0], SHADER_UNIFORMS_EXTRA.atlasSize.value[1]) },
-      totalChars: { value: SHADER_UNIFORMS_EXTRA.totalChars.value },
+      atlasSize: { value: new THREE.Vector2(ATLAS_INFO.cols, ATLAS_INFO.rows) },
+      totalChars: { value: ATLAS_INFO.totalChars },
     },
     vertexShader: AsciiShader.vertexShader,
     fragmentShader: AsciiShader.fragmentShader,
