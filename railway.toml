@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "node server/index.js"
+healthcheckPath = "/api/tower"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

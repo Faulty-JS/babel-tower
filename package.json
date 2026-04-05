@@ -3,9 +3,13 @@
   "version": "0.1.0",
   "description": "A shared tower built by strangers solving puzzles — multiplayer browser game",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "node server/index.js",
-    "start": "NODE_ENV=production node server/index.js"
+    "start": "node server/index.js",
+    "build": "echo 'No build step needed'"
   },
   "dependencies": {
     "colyseus": "^0.15.0",

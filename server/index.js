@@ -70,8 +70,10 @@ globalThis.__babelTower = tower;
 gameServer.define('tower', TowerRoom);
 
 // ─── Start ───────────────────────────────────────────────────────────
-httpServer.listen(SERVER_PORT, () => {
-  console.log(`[Babel] Server listening on http://localhost:${SERVER_PORT}`);
+// Railway provides PORT env var; fall back to constants
+const PORT = process.env.PORT || SERVER_PORT;
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Babel] Server listening on http://0.0.0.0:${PORT}`);
   console.log(`[Babel] Tower height: ${tower.currentHeight} floors`);
   console.log(`[Babel] Active growth points: ${tower.growthPoints.filter(g => g.active).length}`);
 
