@@ -82,7 +82,17 @@ export const AsciiShader = {
       // Hash the cell position for per-cell randomness (deterministic)
       vec2 cellId = floor(pix / charSize);
       float hash = fract(sin(dot(cellId, vec2(127.1, 311.7))) * 43758.5453);
-      int variant = int(hash * 3.0); // 0, 1, or 2
+      float hash2 = fract(sin(dot(cellId, vec2(269.5, 183.3))) * 61532.1947);
+
+      // ~0.3% of cells slowly cycle their character variant
+      // hash2 selects which cells cycle; time drives the animation
+      int variant;
+      if (hash2 > 0.997) {
+        // Rare cycling cell: smoothly rotates through variants
+        variant = int(mod(floor(time * 0.8 + hash * 20.0), 3.0));
+      } else {
+        variant = int(hash * 3.0); // stable per-cell pick
+      }
 
       // Pick character with per-cell variance
       // Each density level has 3 character options
