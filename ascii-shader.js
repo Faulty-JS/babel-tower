@@ -89,7 +89,7 @@ export const AsciiShader = {
       int variant;
       if (hash2 > 0.997) {
         // Rare cycling cell: smoothly rotates through variants
-        variant = int(mod(floor(time * 0.8 + hash * 20.0), 3.0));
+        variant = int(mod(floor(time * 8.0 + hash * 20.0), 3.0));
       } else {
         variant = int(hash * 3.0); // stable per-cell pick
       }
