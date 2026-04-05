@@ -1,0 +1,9 @@
+# Cloudflare Pages configuration
+# Deploy with: npx wrangler pages deploy . --project-name babel
+name = "babel"
+compatibility_date = "2025-04-01"
+
+# Static assets — serve everything except server/ and node_modules/
+[site]
+bucket = "."
+exclude = ["server/*", "node_modules/*", "data/*", ".git/*", "Dockerfile", "fly.toml"]
