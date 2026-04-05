@@ -30,13 +30,14 @@ export const PUZZLE_INTERACT_DISTANCE = 8; // How close you need to be
 
 // ─── Puzzle ──────────────────────────────────────────────────────────
 export const PUZZLE_TYPES = [
-  'trivia',           // OpenTriviaDB — multiple choice questions
-  'image_jigsaw',     // Wikipedia image — rearrange tiles
-  'glyph_trace',      // Connect dots in correct order on a grid
-  'word_excavation',  // Find a hidden word in a letter grid
-  'fragment_assembly', // Drag/rotate pieces to reconstruct a shape
-  'geography',        // REST Countries — flag/capital matching
-  'pattern_complete',  // Complete a visual pattern sequence
+  'glyph_trace',       // Connect dots in correct order on a grid
+  'cipher_wall',       // Decode a substitution cipher
+  'inscription',       // Reconstruct a shattered inscription
+  'rune_lock',         // Rotate concentric rings to align symbols
+  'stone_slide',       // Sliding tile puzzle with letters
+  'echo_sequence',     // Simon Says with ancient symbols
+  'seal_breaking',     // Lights Out on a graph
+  'light_channeling',  // Guide a beam of light through mirrors
 ];
 
 // Difficulty scales with floor number

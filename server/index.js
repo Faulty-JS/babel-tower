@@ -17,6 +17,7 @@ import { TowerRoom } from './tower-room.js';
 import { TowerState } from './tower-state.js';
 import { loadTowerState, saveTowerState } from './db.js';
 import { prewarmCache } from './puzzle-validator.js';
+import { initContentPool, shutdownContentPool } from './content-pool.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -85,18 +86,20 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[Babel] Tower height: ${tower.currentHeight} floors`);
   console.log(`[Babel] Active growth points: ${tower.growthPoints.filter(g => g.active).length}`);
 
-  // Pre-warm puzzle cache in background
-  prewarmCache();
+  // Initialize content pool and pre-warm puzzle cache
+  initContentPool().then(() => prewarmCache());
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[Babel] Shutting down...');
+  shutdownContentPool();
   saveTowerState(tower);
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  shutdownContentPool();
   saveTowerState(tower);
   process.exit(0);
 });

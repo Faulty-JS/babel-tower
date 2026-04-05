@@ -1,50 +1,52 @@
 /**
  * ASCII Art Post-Processing Shader for Babel
  *
- * Font atlas approach: render real monospace glyphs to a canvas texture,
- * then sample them in the fragment shader based on scene luminance.
- * Black text on white paper. Standard keyboard characters only.
- *
- * Characters sorted by visual density (sparse to dense).
- * Rectangular cells (8x14) match monospace character proportions.
+ * Based on emilwidlund/ASCII approach:
+ * - Large 1024x1024 atlas canvas with 16x16 grid of characters
+ * - Characters rendered at 54px for maximum clarity
+ * - Simple luminance → character index mapping
+ * - Black text on white paper
  */
 
-// Characters sorted by ascending visual density
-// Carefully chosen for distinguishable density steps
-const CHAR_SET = ' .`-,:;\'!~+*=<>/\\|?ixczrtsvoenuayhkdfw17023456#%$&@HDGMWB';
+// Characters sorted by visual density (sparse → dense)
+const CHAR_SET = " .:,'-^=*+?!|0#X%WM@";
 
-const ATLAS_COLS = 8;
-const ATLAS_ROWS = Math.ceil(CHAR_SET.length / ATLAS_COLS);
+const GRID_SIZE = 16; // 16x16 grid on the atlas
 const TOTAL_CHARS = CHAR_SET.length;
 
 /**
- * Create a canvas font atlas with all characters rendered at cellSize.
+ * Create a high-resolution character atlas texture.
+ * 1024x1024 canvas, 16x16 grid = 64x64 pixels per character cell.
  */
-export function createCharAtlas(THREE, cellW, cellH) {
+export function createCharAtlas(THREE) {
+  const atlasSize = 1024;
+  const cellSize = atlasSize / GRID_SIZE; // 64px per cell
+
   const canvas = document.createElement('canvas');
-  canvas.width = ATLAS_COLS * cellW;
-  canvas.height = ATLAS_ROWS * cellH;
+  canvas.width = atlasSize;
+  canvas.height = atlasSize;
   const ctx = canvas.getContext('2d');
 
   // White background
   ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, atlasSize, atlasSize);
 
-  // Render each character in black
+  // Render characters in black, large font
   ctx.fillStyle = '#000000';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = `bold ${Math.floor(cellH * 0.82)}px "Courier New", "Courier", monospace`;
+  ctx.font = '54px "Courier New", Courier, monospace';
 
   for (let i = 0; i < CHAR_SET.length; i++) {
-    const col = i % ATLAS_COLS;
-    const row = Math.floor(i / ATLAS_COLS);
-    const x = col * cellW + cellW / 2;
-    const y = row * cellH + cellH / 2;
+    const col = i % GRID_SIZE;
+    const row = Math.floor(i / GRID_SIZE);
+    const x = col * cellSize + cellSize / 2;
+    const y = row * cellSize + cellSize / 2;
     ctx.fillText(CHAR_SET[i], x, y);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
+  texture.flipY = false; // Shader addresses rows top-to-bottom matching canvas
   texture.minFilter = THREE.NearestFilter;
   texture.magFilter = THREE.NearestFilter;
   texture.needsUpdate = true;
@@ -53,8 +55,7 @@ export function createCharAtlas(THREE, cellW, cellH) {
 }
 
 export const ATLAS_INFO = {
-  cols: ATLAS_COLS,
-  rows: ATLAS_ROWS,
+  gridSize: GRID_SIZE,
   totalChars: TOTAL_CHARS,
 };
 
@@ -73,10 +74,10 @@ export const AsciiShader = {
     uniform sampler2D tDiffuse;
     uniform sampler2D tAtlas;
     uniform vec2 resolution;
-    uniform vec2 cellSize;     // (width, height) in pixels
-    uniform float time;
-    uniform vec2 atlasSize;    // (cols, rows) in the atlas
+    uniform float cellSize;
+    uniform float gridSize;    // atlas grid dimensions (16)
     uniform float totalChars;
+    uniform float time;
 
     varying vec2 vUv;
 
@@ -96,55 +97,52 @@ export const AsciiShader = {
       vec2 cellOrigin = cellId * cellSize;
       vec2 cellCenter = (cellOrigin + cellSize * 0.5) / resolution;
 
-      // Position within the cell (0..1)
+      // Position within cell (0..1)
       vec2 p = (pix - cellOrigin) / cellSize;
 
-      // Sample scene luminance at cell center
+      // Sample scene luminance and remap for visibility
       float l = luma(texture2D(tDiffuse, cellCenter).rgb);
+      l = clamp(l * 2.5, 0.0, 1.0);
 
-      // Map luminance to character index (bright scene = dense char = more ink)
-      // Slight contrast boost
-      l = smoothstep(0.01, 0.9, l);
-      float baseIndex = l * (totalChars - 1.0);
+      // Map luminance to character index
+      float charIndex = floor(l * (totalChars - 1.0) + 0.5);
 
-      // Per-cell random jitter for variety (+/- 2 chars)
+      // Per-cell jitter for subtle variety (+/- 1 char)
       float h = rand(cellId);
-      float jitter = (h - 0.5) * 4.0;
+      float jitter = (h - 0.5) * 2.0;
 
-      // Rare cycling cells (~0.5%)
+      // Rare cycling cells (~0.4%)
       float h2 = rand(cellId + 73.0);
-      if (h2 > 0.995) {
-        jitter = sin(time * 6.0 + h * 40.0) * 4.0;
+      if (h2 > 0.996) {
+        jitter = sin(time * 6.0 + h * 40.0) * 3.0;
       }
 
-      float charIndex = clamp(baseIndex + jitter, 0.0, totalChars - 1.0);
+      charIndex = clamp(charIndex + jitter, 0.0, totalChars - 1.0);
       float idx = floor(charIndex);
 
-      // If first character (space), output white
+      // Space = white paper
       if (idx < 0.5) {
-        gl_FragColor = vec4(0.98, 0.97, 0.95, 1.0);
+        gl_FragColor = vec4(0.98, 0.975, 0.95, 1.0);
         return;
       }
 
-      // Atlas UV lookup
-      float col = mod(idx, atlasSize.x);
-      float row = floor(idx / atlasSize.x);
-
+      // Atlas UV: character index to grid position
+      float col = mod(idx, gridSize);
+      float row = floor(idx / gridSize);
       vec2 atlasUV = vec2(
-        (col + p.x) / atlasSize.x,
-        (row + p.y) / atlasSize.y
+        (col + p.x) / gridSize,
+        (row + p.y) / gridSize
       );
 
-      // Sample character glyph (atlas is white bg / black text)
+      // Sample the character glyph
       float glyph = 1.0 - luma(texture2D(tAtlas, atlasUV).rgb);
 
-      // Output: black ink on white paper
-      float paper = 0.98;
-      float ink = paper - glyph * 0.93;
+      // Black ink on warm white paper
+      float ink = 0.98 - glyph * 0.92;
 
-      // Subtle vignette
+      // Vignette
       vec2 uv = pix / resolution;
-      float vig = 1.0 - 0.08 * length((uv - 0.5) * 1.4);
+      float vig = 1.0 - 0.06 * length((uv - 0.5) * 1.3);
 
       gl_FragColor = vec4(vec3(ink * vig), 1.0);
     }

@@ -51,35 +51,24 @@ A multiplayer browser game for the **Vibe Coding Game Jam 2026** (deadline: May 
 - **This shader needs a lot of iteration to look good.** Experiment with: character size, character sets (maybe use Babel alphabet instead of standard ASCII), color mapping, fog behavior through ASCII, glow effects for growth points.
 
 ### Puzzle Diversity
-The game's replayability comes from puzzle variety. Every growth point gives a random puzzle type with content sourced from live APIs. Puzzle types:
+The game's replayability comes from puzzle variety. Every growth point gives a random puzzle type. All puzzles are procedurally generated server-side — no external API dependencies for puzzle content. Every puzzle should feel like **deciphering a secret the tower is guarding**, not like taking a quiz.
 
-1. **Trivia** (OpenTriviaDB) — Multiple choice questions. Category influences visual feedback.
-   - API: `https://opentdb.com/api.php?amount=1&difficulty={easy|medium|hard}`
-   - No auth, CORS enabled, free
+Puzzle types (8 total):
 
-2. **Image Jigsaw** (Wikipedia) — Random image sliced into tiles, player rearranges them.
-   - API: `https://en.wikipedia.org/api/rest_v1/page/random/summary` → get image URL
-   - No auth, CORS enabled
+1. **Glyph Trace** — Grid of dots, draw a single-stroke path connecting them all. Tracing ancient runes.
+2. **Rune Lock** — Concentric rings of symbols. Rotate rings to align target symbols at the keyhole. Cracking an ancient combination lock.
+3. **Light Channeling** — Rotate mirrors on a grid to guide a beam of light from entry to target. Channeling energy through stone.
+4. **Seal Breaking** — Constellation of nodes. Click nodes to toggle them and neighbors (Lights Out). Illuminate the full seal.
+5. **Echo Sequence** — Simon Says with ancient symbols. The tower shows a sequence, player repeats it. Learning the tower's language.
+6. **Stone Slide** — Classic sliding tile puzzle. Reassemble a shattered inscription. Tiles have symbols, not numbers.
+7. **Inscription Reconstruction** — Drag fragments of Babel text into position on a cracked tablet.
+8. **Cipher Wall** — Decode a message carved into the wall using a substitution key the tower provides.
 
-3. **Glyph Trace** (original) — Grid of dots, draw a single-stroke path connecting them all.
-   - Generated server-side. Difficulty = grid size (3×3 → 5×5).
+See `PUZZLES-PROMPT.md` for full implementation specs for each puzzle type.
 
-4. **Word Excavation** (Wikipedia) — Hidden word buried in a letter grid, dig it out.
-   - Fetch random Wikipedia article title, embed in generated grid.
+**Each puzzle type should be individually simple (100-200 lines).** The server generates puzzle data and holds the answer. The client renders the puzzle UI and submits the player's solution. Server validates. Puzzles auto-submit when solved — no "SUBMIT" button needed.
 
-5. **Geography** (REST Countries) — Match flags to countries, name capitals, etc.
-   - API: `https://restcountries.com/v3.1/all?fields=name,capital,flags`
-   - No auth, free
-
-6. **Fragment Assembly** (original) — Drag and rotate broken pieces to reconstruct a shape.
-   - Generated server-side. Target shapes get more complex with difficulty.
-
-7. **Pattern Complete** (original) — Visual sequence with a missing element, pick the right one.
-   - Generated server-side.
-
-**Each puzzle type should be individually simple (100-200 lines).** The server generates puzzle data and holds the answer. The client renders the puzzle UI and submits the player's solution. Server validates.
-
-**Puzzle UI style**: Monospace font, dark background with green/amber text, minimal chrome. Should feel like it belongs in the ASCII world — not a polished modern UI. Think terminal aesthetic.
+**Puzzle UI style**: Monospace font, white background, black text, minimal chrome. Symbols: ◆ ● ▲ ■ ★ ⬢ ◇ ○. No color — just black, white, and greys. The ASCII shader handles the rest. Should feel like inscriptions on stone, not a mobile app.
 
 ### Library of Babel Integration
 - **Babel text generator** is in `shared/babel-text.js` (already implemented).
@@ -87,6 +76,15 @@ The game's replayability comes from puzzle variety. Every growth point gives a r
 - **Ambient inscriptions**: Tower walls display Babel text. Use `getWallInscription(floor, angle)`.
 - **Chat babelification**: Player messages transformed via `babelify(message, sessionId)`.
 - Could also be used: growth point names, loading text, any in-world signage.
+
+### The Tower Feeds on the Internet
+- Puzzle **content** is sourced from live APIs: Wikipedia sentences, article titles, images, Wikidata facts, REST Countries data.
+- The puzzle **mechanics** are ancient and tactile (rune locks, light channeling, cipher decoding), but the **content** inside them is real human knowledge from the web.
+- **Growth points** are named after Wikipedia articles: *"The Growth Point of Andromeda"*
+- **Wall inscriptions** are 90% Babel gibberish, 10% real sentences from Wikipedia — like finding coherent signal in noise.
+- After solving each puzzle, a **reveal moment** briefly shows the real-world text the player just deciphered: *"A neutron star is the collapsed core of a massive supergiant star — absorbed into the tower"*.
+- All API content is fetched **server-side** and cached in a content pool (`server/content-pool.js`). Static fallback lists ensure the game works even if APIs go down.
+- The feeling: the tower is a living archive absorbing all of human knowledge, and every puzzle you solve teaches you something real about the world.
 
 ---
 

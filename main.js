@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
+const CELL_SIZE = 16; // pixel size of each ASCII cell on screen
 import { NetworkClient } from './client/network.js';
 import { PlayerManager } from './client/players.js';
 import { ChatUI } from './client/chat.js';
@@ -55,7 +56,7 @@ function init() {
   // Scene — dark background, shader renders as black-on-white
   state.scene = new THREE.Scene();
   state.scene.background = new THREE.Color(0x000000);
-  state.scene.fog = new THREE.FogExp2(0x000000, 0.005);
+  state.scene.fog = new THREE.FogExp2(0x000000, 0.002);
 
   // Camera
   state.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
@@ -106,19 +107,17 @@ function setupAsciiPostProcessing() {
     format: THREE.RGBAFormat,
   });
 
-  // Rectangular cells: 8 wide x 14 tall (matches monospace proportions)
-  const cellW = 8;
-  const cellH = 14;
-  const charAtlas = createCharAtlas(THREE, cellW, cellH);
+  // Character atlas: 1024x1024, 16x16 grid of glyphs
+  const charAtlas = createCharAtlas(THREE);
 
   state.asciiMaterial = new THREE.ShaderMaterial({
     uniforms: {
       tDiffuse: { value: state.renderTarget.texture },
       tAtlas: { value: charAtlas },
       resolution: { value: new THREE.Vector2(w, h) },
-      cellSize: { value: new THREE.Vector2(cellW, cellH) },
+      cellSize: { value: CELL_SIZE },
       time: { value: 0.0 },
-      atlasSize: { value: new THREE.Vector2(ATLAS_INFO.cols, ATLAS_INFO.rows) },
+      gridSize: { value: ATLAS_INFO.gridSize },
       totalChars: { value: ATLAS_INFO.totalChars },
     },
     vertexShader: AsciiShader.vertexShader,
@@ -142,13 +141,13 @@ function buildTower(numFloors) {
   const towerGroup = new THREE.Group();
   state.towerGroup = towerGroup;
 
-  const stoneMat = new THREE.MeshLambertMaterial({ color: 0x998877 });
-  const darkStoneMat = new THREE.MeshLambertMaterial({ color: 0x776655 });
-  const edgeMat = new THREE.MeshLambertMaterial({ color: 0x887766 });
+  const stoneMat = new THREE.MeshLambertMaterial({ color: 0xeeddcc });
+  const darkStoneMat = new THREE.MeshLambertMaterial({ color: 0xccbbaa });
+  const edgeMat = new THREE.MeshLambertMaterial({ color: 0xddccbb });
 
   // Ground
   const groundGeo = new THREE.PlaneGeometry(500, 500);
-  const groundMat = new THREE.MeshLambertMaterial({ color: 0x665544 });
+  const groundMat = new THREE.MeshLambertMaterial({ color: 0xbbaa99 });
   const ground = new THREE.Mesh(groundGeo, groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.5;
@@ -247,22 +246,22 @@ function buildTower(numFloors) {
 
 // ─── Lighting ────────────────────────────────────────────────────────
 function setupLighting() {
-  const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+  const ambient = new THREE.AmbientLight(0xffffff, 1.2);
   state.scene.add(ambient);
 
   // Strong directional from above-right for clear shadows
-  const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+  const dir = new THREE.DirectionalLight(0xffffff, 1.5);
   dir.position.set(30, 120, 40);
   state.scene.add(dir);
 
   // Soft fill from opposite side
-  const fill = new THREE.DirectionalLight(0xeeeeff, 0.3);
+  const fill = new THREE.DirectionalLight(0xeeeeff, 0.6);
   fill.position.set(-30, 60, -20);
   state.scene.add(fill);
 
   // Interior point lights every 2 floors
   for (let i = 0; i < state.towerHeight; i += 2) {
-    const light = new THREE.PointLight(0xffeedd, 0.6, FLOOR_HEIGHT * 6);
+    const light = new THREE.PointLight(0xffeedd, 1.0, FLOOR_HEIGHT * 6);
     light.position.set(0, i * FLOOR_HEIGHT + FLOOR_HEIGHT * 0.5, 0);
     state.scene.add(light);
   }
@@ -531,11 +530,11 @@ async function connectToServer() {
   };
 
   network.onPuzzleResult = (data) => {
-    showPuzzleResult(data.success);
+    showPuzzleResult(data.success, data.revealText);
     setTimeout(() => {
       state.solvingPuzzle = false;
       state.currentGrowthPointId = null;
-    }, data.success ? 2000 : 1500);
+    }, data.success ? 2500 : 1500);
   };
 
   network.onTowerGrow = (data) => {

@@ -140,6 +140,7 @@ export class TowerRoom extends Room {
           success: true,
           grew: result.grew,
           newFloor: result.newFloor,
+          revealText: puzzle.revealText || null,
         });
 
         if (result.grew) {
