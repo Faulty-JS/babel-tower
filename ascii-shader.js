@@ -3,6 +3,7 @@
  *
  * Edge-detection based: draws black outlines on white background.
  * Combines Sobel edge detection with subtle ASCII fill for depth.
+ * Per-cell character variance with rare cycling cells.
  */
 
 export const AsciiShader = {
@@ -15,6 +16,8 @@ export const AsciiShader = {
   `,
 
   fragmentShader: `
+    precision highp float;
+
     uniform sampler2D tDiffuse;
     uniform vec2 resolution;
     uniform float charSize;
@@ -22,16 +25,13 @@ export const AsciiShader = {
 
     varying vec2 vUv;
 
-    // 5x5 bitmap character
-    float getBit(int n, vec2 p) {
-      p = floor(p * vec2(-5.0, 5.0) + 2.5);
-      if (p.x < 0.0 || p.x > 4.0 || p.y < 0.0 || p.y > 4.0) return 0.0;
-      int idx = int(p.x) + int(p.y) * 5;
-      return float((n >> idx) & 1);
-    }
-
     float luminance(vec3 c) {
       return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    }
+
+    // Simple hash for per-cell randomness
+    float hash21(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
     }
 
     // Sobel edge detection
@@ -53,6 +53,48 @@ export const AsciiShader = {
       return sqrt(gx * gx + gy * gy);
     }
 
+    // Render a character cell as filled or empty based on density
+    // Uses procedural pattern instead of bitmap lookup for compatibility
+    float charPattern(float density, vec2 p, float variant) {
+      // p is 0..1 within the cell
+      // density 0..1 controls how much of the cell is filled
+      // variant adds per-cell uniqueness
+
+      if (density < 0.02) return 0.0; // blank
+
+      // Dot pattern: more dots = denser character
+      float px = p.x;
+      float py = p.y;
+
+      // Center dot (appears at low density)
+      float d = length(p - vec2(0.5)) * 2.0;
+      float dots = step(d, density * 0.6);
+
+      // Cross pattern at medium density
+      if (density > 0.25) {
+        float cross = step(abs(px - 0.5), 0.12) * step(abs(py - 0.5), density * 0.4);
+        cross += step(abs(py - 0.5), 0.12) * step(abs(px - 0.5), density * 0.4);
+        dots = max(dots, min(cross, 1.0));
+      }
+
+      // Grid fill at high density
+      if (density > 0.5) {
+        // Variant shifts the pattern
+        float offset = variant * 0.15;
+        float gx = step(0.5, fract(px * (2.0 + density * 3.0) + offset));
+        float gy = step(0.5, fract(py * (2.0 + density * 3.0) + offset * 1.3));
+        float grid = gx * gy;
+        dots = max(dots, grid * density);
+      }
+
+      // Solid fill at very high density
+      if (density > 0.85) {
+        dots = max(dots, step(0.1, density));
+      }
+
+      return clamp(dots, 0.0, 1.0);
+    }
+
     void main() {
       vec2 pix = gl_FragCoord.xy;
       vec2 cell = floor(pix / charSize) * charSize;
@@ -61,89 +103,40 @@ export const AsciiShader = {
       vec4 texel = texture2D(tDiffuse, cellCenter);
       float lum = luminance(texel.rgb);
 
-      // Edge detection at cell center (sample multiple points for stability)
+      // Edge detection
       float edge = 0.0;
       vec2 texelSize = 1.0 / resolution;
       edge += edgeDetect(cellCenter);
       edge += edgeDetect(cellCenter + vec2(texelSize.x, 0.0));
       edge += edgeDetect(cellCenter + vec2(0.0, texelSize.y));
       edge /= 3.0;
-
-      // Amplify edges
       edge = smoothstep(0.05, 0.25, edge);
 
-      // Also add subtle shading for dark areas (not just edges)
+      // Subtle shading for dark areas
       float shade = 1.0 - smoothstep(0.0, 0.5, lum);
-      shade *= 0.3; // Keep shading subtle
+      shade *= 0.3;
 
-      // Combine: edges are primary, shading is secondary
+      // Combine
       float ink = max(edge, shade);
 
-      // Hash the cell position for per-cell randomness (deterministic)
+      // Per-cell hash for variance
       vec2 cellId = floor(pix / charSize);
-      float hash = fract(sin(dot(cellId, vec2(127.1, 311.7))) * 43758.5453);
-      float hash2 = fract(sin(dot(cellId, vec2(269.5, 183.3))) * 61532.1947);
+      float h1 = hash21(cellId);
+      float h2 = hash21(cellId + vec2(73.0, 157.0));
 
-      // ~0.3% of cells slowly cycle their character variant
-      // hash2 selects which cells cycle; time drives the animation
-      int variant = int(hash * 3.0);
-      if (hash2 > 0.997) {
-        variant = int(mod(floor(time * 8.0 + hash * 20.0), 3.0));
-      }
-
-      // Pick character with per-cell variance
-      // Each density level has 3 character options
-      int n = 0;
-      if (ink > 0.05) {
-        // sparse: . , '
-        if (variant == 0) n = 4096;       // .
-        else if (variant == 1) n = 8192;   // ,
-        else n = 16384;                    // '
-      }
-      if (ink > 0.12) {
-        // light: : ; -
-        if (variant == 0) n = 131200;      // :
-        else if (variant == 1) n = 135296;  // ;
-        else n = 14745600;                  // -
-      }
-      if (ink > 0.22) {
-        // medium-light: = ~ +
-        if (variant == 0) n = 14762080;    // =
-        else if (variant == 1) n = 4675652; // +
-        else n = 14752800;                  // ~
-      }
-      if (ink > 0.34) {
-        // medium: * x /
-        if (variant == 0) n = 11512810;    // *
-        else if (variant == 1) n = 11162952; // x
-        else n = 4329604;                   // /
-      }
-      if (ink > 0.48) {
-        // medium-dense: o 0 &
-        if (variant == 0) n = 15255086;    // o
-        else if (variant == 1) n = 15255150; // 0
-        else n = 11197490;                  // &
-      }
-      if (ink > 0.62) {
-        // dense: # $ %
-        if (variant == 0) n = 13199452;    // #
-        else if (variant == 1) n = 15252014; // $
-        else n = 15239202;                  // %
-      }
-      if (ink > 0.78) {
-        // very dense: @ W M
-        if (variant == 0) n = 32424190;    // @
-        else if (variant == 1) n = 31983550; // W
-        else n = 32307775;                  // M
+      // ~0.3% of cells cycle rapidly
+      float variant = h1;
+      if (h2 > 0.997) {
+        variant = fract(time * 8.0 + h1 * 20.0);
       }
 
+      // Render character pattern
       vec2 p = mod(pix, charSize) / charSize;
-      float c = getBit(n, p);
+      float c = charPattern(ink, p, variant);
 
       // Black ink on white paper
       vec3 paper = vec3(1.0, 0.99, 0.97);
       vec3 inkColor = vec3(0.0, 0.0, 0.0);
-
       vec3 col = mix(paper, inkColor, c);
 
       // Subtle vignette
