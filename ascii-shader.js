@@ -79,17 +79,56 @@ export const AsciiShader = {
       // Combine: edges are primary, shading is secondary
       float ink = max(edge, shade);
 
-      // Pick character density based on ink amount
+      // Hash the cell position for per-cell randomness (deterministic)
+      vec2 cellId = floor(pix / charSize);
+      float hash = fract(sin(dot(cellId, vec2(127.1, 311.7))) * 43758.5453);
+      int variant = int(hash * 3.0); // 0, 1, or 2
+
+      // Pick character with per-cell variance
+      // Each density level has 3 character options
       int n = 0;
-      if (ink > 0.05) n = 4096;        // .
-      if (ink > 0.12) n = 131200;       // :
-      if (ink > 0.20) n = 14745600;     // -
-      if (ink > 0.30) n = 4675652;      // +
-      if (ink > 0.42) n = 11512810;     // *
-      if (ink > 0.55) n = 15255086;     // o
-      if (ink > 0.68) n = 13199452;     // #
-      if (ink > 0.80) n = 15239202;     // %
-      if (ink > 0.90) n = 32424190;     // @
+      if (ink > 0.05) {
+        // sparse: . , `
+        if (variant == 0) n = 4096;       // .
+        else if (variant == 1) n = 8192;   // ,
+        else n = 16384;                    // `
+      }
+      if (ink > 0.12) {
+        // light: : ; -
+        if (variant == 0) n = 131200;      // :
+        else if (variant == 1) n = 135296;  // ;
+        else n = 14745600;                  // -
+      }
+      if (ink > 0.22) {
+        // medium-light: = ~ +
+        if (variant == 0) n = 14762080;    // =
+        else if (variant == 1) n = 4675652; // +
+        else n = 14752800;                  // ~
+      }
+      if (ink > 0.34) {
+        // medium: * x /
+        if (variant == 0) n = 11512810;    // *
+        else if (variant == 1) n = 11162952; // x
+        else n = 4329604;                   // /
+      }
+      if (ink > 0.48) {
+        // medium-dense: o 0 &
+        if (variant == 0) n = 15255086;    // o
+        else if (variant == 1) n = 15255150; // 0
+        else n = 11197490;                  // &
+      }
+      if (ink > 0.62) {
+        // dense: # $ %
+        if (variant == 0) n = 13199452;    // #
+        else if (variant == 1) n = 15252014; // $
+        else n = 15239202;                  // %
+      }
+      if (ink > 0.78) {
+        // very dense: @ W M
+        if (variant == 0) n = 32424190;    // @
+        else if (variant == 1) n = 31983550; // W
+        else n = 32307775;                  // M
+      }
 
       vec2 p = mod(pix, charSize) / charSize;
       float c = getBit(n, p);
