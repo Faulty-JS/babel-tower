@@ -328,18 +328,41 @@ function generateDefaultGrowthPoints() {
 // ─── Controls ────────────────────────────────────────────────────────
 function setupControls() {
   const blocker = document.getElementById('blocker');
+  let hasEnteredOnce = false;
 
   blocker.addEventListener('click', () => {
     document.body.requestPointerLock();
   });
 
+  // Also re-lock on clicking the canvas after tabbing back
+  document.addEventListener('click', (e) => {
+    if (hasEnteredOnce && !state.locked && !state.solvingPuzzle &&
+        !(chatUI && chatUI.visible) && e.target.tagName === 'CANVAS') {
+      document.body.requestPointerLock();
+    }
+  });
+
   document.addEventListener('pointerlockchange', () => {
     state.locked = document.pointerLockElement === document.body;
+
+    if (state.locked && !hasEnteredOnce) {
+      hasEnteredOnce = true;
+    }
+
     // Don't show blocker when chatting or solving puzzle
     if (state.solvingPuzzle || (chatUI && chatUI.visible)) {
       blocker.style.display = 'none';
-    } else {
+    } else if (!hasEnteredOnce) {
+      // First time: show full title screen blocker
       blocker.style.display = state.locked ? 'none' : 'flex';
+    } else {
+      // After first entry: hide blocker, just show small resume hint
+      blocker.style.display = 'none';
+      if (!state.locked) {
+        showResumeHint();
+      } else {
+        hideResumeHint();
+      }
     }
   });
 
@@ -532,6 +555,28 @@ async function connectToServer() {
     console.log('[Game] Running in offline mode');
     updateHUD();
   }
+}
+
+// ─── Resume Hint (shown when pointer lock lost after first entry) ────
+function showResumeHint() {
+  let hint = document.getElementById('resume-hint');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.id = 'resume-hint';
+    hint.textContent = 'click to resume';
+    hint.style.cssText = `
+      position: fixed; bottom: 50%; left: 50%; transform: translateX(-50%);
+      color: #999; font-family: monospace; font-size: 14px;
+      z-index: 90; pointer-events: none;
+    `;
+    document.body.appendChild(hint);
+  }
+  hint.style.display = 'block';
+}
+
+function hideResumeHint() {
+  const hint = document.getElementById('resume-hint');
+  if (hint) hint.style.display = 'none';
 }
 
 // ─── HUD ─────────────────────────────────────────────────────────────
