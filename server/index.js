@@ -42,12 +42,20 @@ if (tower.growthPoints.filter(g => g.active).length === 0) {
 
 // ─── Express ─────────────────────────────────────────────────────────
 const app = express();
+
+// CORS — allow Cloudflare Pages origin to connect
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Static files (also served from Railway as fallback)
 app.use(express.static(CLIENT_DIR, {
-  maxAge: 0,
-  etag: false,
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-store');
-  },
+  maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
+  etag: true,
 }));
 
 // API endpoint to get tower state (for initial load without WebSocket)

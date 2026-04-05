@@ -217,6 +217,13 @@
     <div class="prompt">click to enter the tower</div>
   </div>
 
+  <!-- Server config: set BABEL_SERVER_URL to your Railway WebSocket URL in production -->
+  <!-- e.g. wss://babel-tower-production.up.railway.app -->
+  <script>
+    // Leave empty for same-origin (dev), set to Railway URL for Cloudflare Pages deploy
+    window.BABEL_SERVER_URL = '';
+  </script>
+
   <!-- Colyseus client -->
   <script src="https://unpkg.com/colyseus.js@0.15.24/dist/colyseus.js"></script>
 

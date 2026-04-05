@@ -1,9 +1,7 @@
-# Cloudflare Pages configuration
-# Deploy with: npx wrangler pages deploy . --project-name babel
-name = "babel"
-compatibility_date = "2025-04-01"
-
-# Static assets — serve everything except server/ and node_modules/
-[site]
-bucket = "."
-exclude = ["server/*", "node_modules/*", "data/*", ".git/*", "Dockerfile", "fly.toml"]
+# Cloudflare Pages deploy command:
+#   npx wrangler pages project create babel
+#   npx wrangler pages deploy . --project-name babel
+#
+# Only static files are deployed (server/ runs on Railway).
+# After deploying, set window.BABEL_SERVER_URL in index.html
+# to your Railway WebSocket URL.
