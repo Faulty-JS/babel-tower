@@ -40,8 +40,11 @@ export class ChatUI {
         this.network.sendChat(this.input.value.trim());
         this.input.value = '';
         this.hideInput();
+        // Re-enter game
+        document.body.requestPointerLock();
       } else if (e.key === 'Escape') {
         this.hideInput();
+        document.body.requestPointerLock();
       }
     });
 

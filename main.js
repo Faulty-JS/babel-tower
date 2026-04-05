@@ -335,9 +335,12 @@ function setupControls() {
 
   document.addEventListener('pointerlockchange', () => {
     state.locked = document.pointerLockElement === document.body;
-    blocker.style.display = state.locked ? 'none' : 'flex';
-    // Don't show blocker when puzzle is open
-    if (state.solvingPuzzle) blocker.style.display = 'none';
+    // Don't show blocker when chatting or solving puzzle
+    if (state.solvingPuzzle || (chatUI && chatUI.visible)) {
+      blocker.style.display = 'none';
+    } else {
+      blocker.style.display = state.locked ? 'none' : 'flex';
+    }
   });
 
   document.addEventListener('mousemove', (e) => {
@@ -371,10 +374,9 @@ function setupControls() {
         interactWithGrowthPoint();
         break;
       case 'KeyT':
-      case 'Enter':
-        if (chatUI) {
+        if (chatUI && !chatUI.visible) {
           if (document.pointerLockElement) document.exitPointerLock();
-          chatUI.toggle();
+          chatUI.showInput();
         }
         break;
     }
@@ -575,6 +577,8 @@ function showGrowthFlash() {
 }
 
 // ─── Physics / Movement ──────────────────────────────────────────────
+const PLAYER_RADIUS = 1.5; // collision radius
+
 function updateMovement(dt) {
   if (!state.locked) return;
 
@@ -598,18 +602,66 @@ function updateMovement(dt) {
   state.velocity.z = dir.z * MOVE_SPEED;
   state.velocity.y += GRAVITY * dt;
 
-  state.camera.position.x += state.velocity.x * dt;
-  state.camera.position.y += state.velocity.y * dt;
-  state.camera.position.z += state.velocity.z * dt;
+  // Proposed new position
+  const newX = state.camera.position.x + state.velocity.x * dt;
+  const newZ = state.camera.position.z + state.velocity.z * dt;
+  const newY = state.camera.position.y + state.velocity.y * dt;
 
-  // Floor collision
-  state.onGround = false;
+  // ─── Wall / Column collision ─────────────────────────────────
   const py = state.camera.position.y - PLAYER_HEIGHT;
+  let blockedX = false;
+  let blockedZ = false;
+
+  // Check against outer walls (cylindrical boundary per floor)
+  for (let floor = 0; floor < state.towerHeight; floor++) {
+    const floorY = floor * FLOOR_HEIGHT;
+    const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
+
+    // Only check floors near the player's height
+    if (py < floorY - 2 || py > floorY + FLOOR_HEIGHT) continue;
+
+    const distNew = Math.sqrt(newX * newX + newZ * newZ);
+
+    // Outer wall: can't go outside the tower radius
+    if (distNew > radius - PLAYER_RADIUS) {
+      // Push back inside
+      const angle = Math.atan2(newZ, newX);
+      const maxR = radius - PLAYER_RADIUS;
+      const clampedX = Math.cos(angle) * maxR;
+      const clampedZ = Math.sin(angle) * maxR;
+
+      // Only clamp if we were inside before (don't trap outside players)
+      const distCur = Math.sqrt(state.camera.position.x ** 2 + state.camera.position.z ** 2);
+      if (distCur < radius) {
+        if (Math.abs(newX - clampedX) > 0.01) blockedX = true;
+        if (Math.abs(newZ - clampedZ) > 0.01) blockedZ = true;
+      }
+    }
+
+    // Inner wall: can't go inside the inner column ring
+    const innerR = radius * 0.3;
+    if (distNew < innerR + PLAYER_RADIUS && distNew > 0) {
+      const distCur = Math.sqrt(state.camera.position.x ** 2 + state.camera.position.z ** 2);
+      if (distCur > innerR) {
+        blockedX = true;
+        blockedZ = true;
+      }
+    }
+  }
+
+  // Apply movement with collision
+  if (!blockedX) state.camera.position.x = newX;
+  if (!blockedZ) state.camera.position.z = newZ;
+  state.camera.position.y = newY;
+
+  // ─── Floor / Ramp collision ──────────────────────────────────
+  state.onGround = false;
   const px = state.camera.position.x;
   const pz = state.camera.position.z;
+  const pyNew = state.camera.position.y - PLAYER_HEIGHT;
   const distFromCenter = Math.sqrt(px * px + pz * pz);
 
-  // Check ramp steps first for smooth ramp walking
+  // Check ramp steps
   let onRamp = false;
   if (state.towerGroup) {
     state.towerGroup.traverse(obj => {
@@ -619,7 +671,7 @@ function updateMovement(dt) {
         const dx = px - wp.x;
         const dz = pz - wp.z;
         const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 3.5 && py >= wp.y - 2 && py <= wp.y + 1.5) {
+        if (dist < 3.5 && pyNew >= wp.y - 2 && pyNew <= wp.y + 1.5) {
           state.camera.position.y = wp.y + PLAYER_HEIGHT;
           state.velocity.y = 0;
           state.onGround = true;
@@ -634,7 +686,7 @@ function updateMovement(dt) {
       const floorY = floor * FLOOR_HEIGHT;
       const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
 
-      if (distFromCenter < radius && py < floorY + 2 && py > floorY - 3) {
+      if (distFromCenter < radius && pyNew < floorY + 2 && pyNew > floorY - 3) {
         state.camera.position.y = floorY + PLAYER_HEIGHT;
         state.velocity.y = 0;
         state.onGround = true;
