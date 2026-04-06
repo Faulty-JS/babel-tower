@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
-const CELL_SIZE = 16; // pixel size of each ASCII cell on screen
+const CELL_SIZE = 8; // pixel width of each ASCII cell (height is 12, set in shader)
 import { NetworkClient } from './client/network.js';
 import { PlayerManager } from './client/players.js';
 import { ChatUI } from './client/chat.js';

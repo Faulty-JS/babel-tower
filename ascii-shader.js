@@ -1,63 +1,38 @@
 /**
  * ASCII Art Post-Processing Shader for Babel
  *
- * Based on emilwidlund/ASCII approach:
- * - Large 1024x1024 atlas canvas with 16x16 grid of characters
- * - Characters rendered at 54px for maximum clarity
- * - Simple luminance → character index mapping
- * - Black text on white paper
+ * Approach: render each character as a hand-crafted 5x5 bitmap pattern
+ * directly in the fragment shader. No font atlas needed — avoids
+ * downscaling artifacts that make characters unreadable.
+ *
+ * Characters sorted by density (sparse → dense):
+ *   space . : - = + * # % @
+ *
+ * Each cell is 8x12 pixels (monospace aspect ratio).
+ * Characters are drawn as 5x5 pixel patterns within the cell.
  */
 
-// Characters sorted by visual density (sparse → dense)
-const CHAR_SET = " .:,'-^=*+?!|0#X%WM@";
-
-const GRID_SIZE = 16; // 16x16 grid on the atlas
-const TOTAL_CHARS = CHAR_SET.length;
-
-/**
- * Create a high-resolution character atlas texture.
- * 1024x1024 canvas, 16x16 grid = 64x64 pixels per character cell.
- */
-export function createCharAtlas(THREE) {
-  const atlasSize = 1024;
-  const cellSize = atlasSize / GRID_SIZE; // 64px per cell
-
-  const canvas = document.createElement('canvas');
-  canvas.width = atlasSize;
-  canvas.height = atlasSize;
-  const ctx = canvas.getContext('2d');
-
-  // White background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, atlasSize, atlasSize);
-
-  // Render characters in black, large font
-  ctx.fillStyle = '#000000';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = '54px "Courier New", Courier, monospace';
-
-  for (let i = 0; i < CHAR_SET.length; i++) {
-    const col = i % GRID_SIZE;
-    const row = Math.floor(i / GRID_SIZE);
-    const x = col * cellSize + cellSize / 2;
-    const y = row * cellSize + cellSize / 2;
-    ctx.fillText(CHAR_SET[i], x, y);
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.flipY = false; // Shader addresses rows top-to-bottom matching canvas
-  texture.minFilter = THREE.NearestFilter;
-  texture.magFilter = THREE.NearestFilter;
-  texture.needsUpdate = true;
-
-  return texture;
-}
+// 10 characters from sparse to dense
+const CHAR_COUNT = 10;
 
 export const ATLAS_INFO = {
-  gridSize: GRID_SIZE,
-  totalChars: TOTAL_CHARS,
+  gridSize: 1,       // not used with bitmap approach
+  totalChars: CHAR_COUNT,
 };
+
+// No atlas needed — bitmaps are encoded in the shader
+export function createCharAtlas(THREE) {
+  // Return a 1x1 white dummy texture (shader uses built-in bitmaps)
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 1, 1);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
 
 export const AsciiShader = {
   vertexShader: `
@@ -72,14 +47,17 @@ export const AsciiShader = {
     precision highp float;
 
     uniform sampler2D tDiffuse;
-    uniform sampler2D tAtlas;
     uniform vec2 resolution;
-    uniform float cellSize;
-    uniform float gridSize;    // atlas grid dimensions (16)
+    uniform float cellSize; // not used, we use fixed 8x12
+    uniform float gridSize;
     uniform float totalChars;
     uniform float time;
 
     varying vec2 vUv;
+
+    // Cell dimensions
+    const float CELL_W = 8.0;
+    const float CELL_H = 12.0;
 
     float luma(vec3 c) {
       return dot(c, vec3(0.299, 0.587, 0.114));
@@ -89,62 +67,206 @@ export const AsciiShader = {
       return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
     }
 
+    // 5x5 bitmap font — each character encoded as 5 floats (rows),
+    // each float has 5 bits (columns). Bit 1 = ink pixel.
+    // Returns 1.0 if pixel (px, py) is ink for character index idx.
+    float getBitmapPixel(int idx, int px, int py) {
+      // Clamp to 5x5 grid
+      if (px < 0 || px > 4 || py < 0 || py > 4) return 0.0;
+
+      // Encode each character as 5 rows of 5-bit patterns
+      // Characters: space . : - = + * # % @
+
+      // space (index 0) - all empty
+      // . (index 1)
+      // : (index 2)
+      // - (index 3)
+      // = (index 4)
+      // + (index 5)
+      // * (index 6)
+      // # (index 7)
+      // % (index 8)
+      // @ (index 9)
+
+      int row;
+
+      if (idx == 0) {
+        // space — empty
+        return 0.0;
+      }
+      else if (idx == 1) {
+        // . — single dot bottom center
+        //  .....
+        //  .....
+        //  .....
+        //  .....
+        //  ..#..
+        if (py == 4 && px == 2) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 2) {
+        // : — two dots
+        //  .....
+        //  ..#..
+        //  .....
+        //  ..#..
+        //  .....
+        if (px == 2 && (py == 1 || py == 3)) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 3) {
+        // - — horizontal line middle
+        //  .....
+        //  .....
+        //  .###.
+        //  .....
+        //  .....
+        if (py == 2 && px >= 1 && px <= 3) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 4) {
+        // = — two horizontal lines
+        //  .....
+        //  .###.
+        //  .....
+        //  .###.
+        //  .....
+        if ((py == 1 || py == 3) && px >= 1 && px <= 3) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 5) {
+        // + — cross
+        //  .....
+        //  ..#..
+        //  .###.
+        //  ..#..
+        //  .....
+        if (py == 2 && px >= 1 && px <= 3) return 1.0;
+        if (px == 2 && py >= 1 && py <= 3) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 6) {
+        // * — star/asterisk
+        //  .....
+        //  .#.#.
+        //  ..#..
+        //  .#.#.
+        //  .....
+        if (py == 1 && (px == 1 || px == 3)) return 1.0;
+        if (py == 2 && px == 2) return 1.0;
+        if (py == 3 && (px == 1 || px == 3)) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 7) {
+        // # — hash/grid
+        //  .#.#.
+        //  #####
+        //  .#.#.
+        //  #####
+        //  .#.#.
+        if (py == 1 || py == 3) return 1.0; // full rows
+        if (px == 1 || px == 3) return 1.0; // columns
+        return 0.0;
+      }
+      else if (idx == 8) {
+        // % — dense diagonal
+        //  ##..#
+        //  ##.#.
+        //  ..#..
+        //  .#.##
+        //  #..##
+        if (py == 0 && (px <= 1 || px == 4)) return 1.0;
+        if (py == 1 && (px <= 1 || px == 3)) return 1.0;
+        if (py == 2 && px == 2) return 1.0;
+        if (py == 3 && (px == 1 || px >= 3)) return 1.0;
+        if (py == 4 && (px == 0 || px >= 3)) return 1.0;
+        return 0.0;
+      }
+      else if (idx == 9) {
+        // @ — nearly full block
+        //  .###.
+        //  #.##.
+        //  #.#.#
+        //  #.##.
+        //  .###.
+        if (py == 0 && px >= 1 && px <= 3) return 1.0;
+        if (py == 1 && (px == 0 || px == 2 || px == 3)) return 1.0;
+        if (py == 2 && (px == 0 || px == 2 || px == 4)) return 1.0;
+        if (py == 3 && (px == 0 || px == 2 || px == 3)) return 1.0;
+        if (py == 4 && px >= 1 && px <= 3) return 1.0;
+        return 0.0;
+      }
+
+      return 0.0;
+    }
+
     void main() {
       vec2 pix = gl_FragCoord.xy;
 
       // Which cell is this pixel in?
-      vec2 cellId = floor(pix / cellSize);
-      vec2 cellOrigin = cellId * cellSize;
-      vec2 cellCenter = (cellOrigin + cellSize * 0.5) / resolution;
+      vec2 cellId = floor(vec2(pix.x / CELL_W, pix.y / CELL_H));
+      vec2 cellOrigin = vec2(cellId.x * CELL_W, cellId.y * CELL_H);
+      vec2 cellCenter = (cellOrigin + vec2(CELL_W * 0.5, CELL_H * 0.5)) / resolution;
 
-      // Position within cell (0..1)
-      vec2 p = (pix - cellOrigin) / cellSize;
+      // Position within cell (pixel coords 0..CELL_W, 0..CELL_H)
+      vec2 localPix = pix - cellOrigin;
 
-      // Sample scene luminance and remap for visibility
+      // Map local pixel to 5x5 bitmap position
+      // Center the 5x5 grid (5 wide, 5 tall) within the 8x12 cell
+      // Horizontal: 5 pixels centered in 8 → offset 1.5, scale 1.0
+      // Vertical: 5 pixels centered in 12 → offset 3.5, scale 1.0
+      int bx = int(floor(localPix.x - 1.5));
+      int by = int(floor(localPix.y - 3.5));
+
+      // Sample scene luminance at cell center
       float l = luma(texture2D(tDiffuse, cellCenter).rgb);
-      l = clamp(l * 2.5, 0.0, 1.0);
 
-      // Map luminance to character index
-      float charIndex = floor(l * (totalChars - 1.0) + 0.5);
+      // Map luminance to character index (0-9)
+      // Low luminance (dark scene) → space (white paper)
+      // High luminance (bright scene) → dense characters (ink)
+      float charIndexF = l * 9.0;
 
-      // Per-cell jitter for subtle variety (+/- 1 char)
+      // Per-cell jitter for subtle variety (+/- 0.8 char)
       float h = rand(cellId);
-      float jitter = (h - 0.5) * 2.0;
+      float jitter = (h - 0.5) * 1.6;
 
-      // Rare cycling cells (~0.4%)
+      // Rare cycling cells (~0.5%)
       float h2 = rand(cellId + 73.0);
-      if (h2 > 0.996) {
-        jitter = sin(time * 6.0 + h * 40.0) * 3.0;
+      if (h2 > 0.995) {
+        jitter = sin(time * 8.0 + h * 50.0) * 2.0;
       }
 
-      charIndex = clamp(charIndex + jitter, 0.0, totalChars - 1.0);
-      float idx = floor(charIndex);
+      charIndexF = clamp(charIndexF + jitter, 0.0, 9.0);
+      int charIdx = int(floor(charIndexF));
 
       // Space = white paper
-      if (idx < 0.5) {
+      if (charIdx == 0) {
         gl_FragColor = vec4(0.98, 0.975, 0.95, 1.0);
         return;
       }
 
-      // Atlas UV: character index to grid position
-      float col = mod(idx, gridSize);
-      float row = floor(idx / gridSize);
-      vec2 atlasUV = vec2(
-        (col + p.x) / gridSize,
-        (row + p.y) / gridSize
-      );
+      // Check if this pixel is ink in the bitmap
+      float ink = getBitmapPixel(charIdx, bx, by);
 
-      // Sample the character glyph
-      float glyph = 1.0 - luma(texture2D(tAtlas, atlasUV).rgb);
+      // Slight color tint from the scene
+      vec3 sceneColor = texture2D(tDiffuse, cellCenter).rgb;
+      float sceneLuma = luma(sceneColor);
 
-      // Black ink on warm white paper
-      float ink = 0.98 - glyph * 0.92;
+      // Mix: ink pixels are dark, non-ink pixels are paper
+      vec3 paperColor = vec3(0.98, 0.975, 0.95);
+      vec3 inkColor = vec3(0.06, 0.06, 0.08); // near-black
+
+      // Subtle scene color tint on ink
+      inkColor = mix(inkColor, sceneColor * 0.3, 0.15);
+
+      vec3 color = mix(paperColor, inkColor, ink);
 
       // Vignette
       vec2 uv = pix / resolution;
       float vig = 1.0 - 0.06 * length((uv - 0.5) * 1.3);
+      color *= vig;
 
-      gl_FragColor = vec4(vec3(ink * vig), 1.0);
+      gl_FragColor = vec4(color, 1.0);
     }
   `
 };
