@@ -1,5 +1,5 @@
 /**
- * Network Client — Colyseus WebSocket connection to the game server.
+ * Network Client — Colyseus WebSocket connection to the Library of Babel.
  */
 
 import { TICK_RATE } from '../shared/constants.js';
@@ -16,26 +16,23 @@ export class NetworkClient {
     this.onPlayerJoin = null;
     this.onPlayerLeave = null;
     this.onPlayerMove = null;
-    this.onTowerGrow = null;
     this.onChatBubble = null;
-    this.onPuzzleReceived = null;
-    this.onPuzzleResult = null;
     this.onInitState = null;
-    this.onGrowthPointsUpdate = null;
+    this.onArticleData = null;
+    this.onArticleError = null;
+    this.onWordPair = null;
+    this.onJourneyComplete = null;
+    this.onPlayerArticleChange = null;
 
     // Position send throttle
     this._lastSendTime = 0;
     this._sendInterval = 1000 / TICK_RATE;
   }
 
-  /**
-   * Connect to the game server and join the tower room.
-   */
   async connect(serverUrl) {
     try {
-      // Colyseus client loaded from CDN as global
       this.client = new Colyseus.Client(serverUrl);
-      this.room = await this.client.joinOrCreate('tower');
+      this.room = await this.client.joinOrCreate('library');
       this.sessionId = this.room.sessionId;
       this.connected = true;
 
@@ -46,9 +43,16 @@ export class NetworkClient {
         if (sessionId === this.sessionId) return;
         if (this.onPlayerJoin) this.onPlayerJoin(sessionId, player.color);
 
+        let lastArticle = player.currentArticle;
         player.onChange(() => {
           if (this.onPlayerMove) {
             this.onPlayerMove(sessionId, player.x, player.y, player.z, player.rotationY);
+          }
+          if (player.currentArticle !== lastArticle) {
+            lastArticle = player.currentArticle;
+            if (this.onPlayerArticleChange) {
+              this.onPlayerArticleChange(sessionId, player.currentArticle);
+            }
           }
         });
       });
@@ -64,30 +68,29 @@ export class NetworkClient {
         if (this.onInitState) this.onInitState(data);
       });
 
-      this.room.onMessage('puzzleData', (data) => {
-        if (this.onPuzzleReceived) this.onPuzzleReceived(data);
+      this.room.onMessage('articleData', (data) => {
+        if (this.onArticleData) this.onArticleData(data);
       });
 
-      this.room.onMessage('puzzleResult', (data) => {
-        if (this.onPuzzleResult) this.onPuzzleResult(data);
+      this.room.onMessage('articleError', (data) => {
+        if (this.onArticleError) this.onArticleError(data);
       });
 
-      this.room.onMessage('towerGrew', (data) => {
-        if (this.onTowerGrow) this.onTowerGrow(data);
+      this.room.onMessage('wordPair', (data) => {
+        if (this.onWordPair) this.onWordPair(data);
+      });
+
+      this.room.onMessage('journeyComplete', (data) => {
+        if (this.onJourneyComplete) this.onJourneyComplete(data);
       });
 
       this.room.onMessage('chatBubble', (data) => {
         if (this.onChatBubble) this.onChatBubble(data);
       });
 
-      this.room.onMessage('growthPointsUpdate', (data) => {
-        if (this.onGrowthPointsUpdate) this.onGrowthPointsUpdate(data);
-      });
-
       this.room.onLeave((code) => {
         console.log('[Network] Left room, code:', code);
         this.connected = false;
-        // Auto-reconnect after a delay
         if (code !== 1000) {
           setTimeout(() => this.connect(serverUrl), 3000);
         }
@@ -105,9 +108,6 @@ export class NetworkClient {
     }
   }
 
-  /**
-   * Send player position (throttled).
-   */
   sendPosition(x, y, z, rotationY) {
     if (!this.room || !this.connected) return;
     const now = Date.now();
@@ -116,19 +116,14 @@ export class NetworkClient {
     this.room.send('position', { x, y, z, rotationY });
   }
 
-  requestPuzzle(growthPointId) {
+  enterPortal(targetArticle) {
     if (!this.room) return;
-    this.room.send('requestPuzzle', { growthPointId });
+    this.room.send('enterPortal', { targetArticle });
   }
 
-  submitSolution(growthPointId, answer) {
+  requestNewPair() {
     if (!this.room) return;
-    this.room.send('submitSolution', { growthPointId, answer });
-  }
-
-  cancelPuzzle() {
-    if (!this.room) return;
-    this.room.send('cancelPuzzle', {});
+    this.room.send('requestNewPair', {});
   }
 
   sendChat(message) {

@@ -1,7 +1,7 @@
 {
   "name": "babel",
   "version": "0.1.0",
-  "description": "A shared tower built by strangers solving puzzles — multiplayer browser game",
+  "description": "The Wikipedia Game set inside the Library of Babel — multiplayer browser game",
   "type": "module",
   "engines": {
     "node": ">=18.0.0"

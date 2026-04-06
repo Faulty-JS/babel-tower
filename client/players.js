@@ -51,6 +51,7 @@ export class PlayerManager {
       chatSprite: null,
       chatTimeout: null,
       color: colorHex,
+      currentArticle: '',
     });
   }
 
@@ -67,6 +68,21 @@ export class PlayerManager {
     if (!player) return;
     player.targetPos.set(x, y, z);
     player.targetRotY = rotationY;
+  }
+
+  setPlayerArticle(sessionId, article) {
+    const player = this.players.get(sessionId);
+    if (!player) return;
+    player.currentArticle = article;
+  }
+
+  /**
+   * Show/hide players based on whether they're in the same article-room.
+   */
+  filterByArticle(localArticle) {
+    for (const [, player] of this.players) {
+      player.mesh.visible = player.currentArticle === localArticle;
+    }
   }
 
   showChatBubble(sessionId, babelText) {

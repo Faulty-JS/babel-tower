@@ -1,34 +1,29 @@
 /**
- * ASCII Art Post-Processing Shader for Babel
+ * Antiquarian Print Shader for Babel
  *
- * Pen-and-ink aesthetic — two layers:
- *   1. LINEWORK (primary) — Sobel edge detection traces structure outlines
- *   2. SHADING (secondary) — subtle luminance fill in darker areas
+ * Design direction: old book illustration / etching print.
+ * The world looks like it was drawn by an illustrator for
+ * a leather-bound volume of Borges. Every choice is intentional:
  *
- * Edges drive character density. Shading is an undertone.
- * Pure black ink on white paper. Characters should be readable.
- *
- * 12x16 pixel cells with 7x9 bitmap glyphs.
- * Characters by density: space . : - = + * # % @
+ *   Palette:  Warm sepia — cream, ochre, umber, ink.
+ *             A hint of scene color bleeds through for room variety.
+ *   Edges:    Two-scale Sobel → bold ink outlines with pen-weight wobble.
+ *   Tone:     S-curve contrast → mapped through the sepia gradient.
+ *   Shadows:  Diagonal hatching with organic stroke breaks.
+ *             Cross-hatching only in the deepest darks.
+ *   Paper:    Gentle grain — the surface breathes.
+ *   Compose:  Warm vignette pulls focus to center.
  */
 
-const CHAR_COUNT = 10;
-
-export const ATLAS_INFO = {
-  gridSize: 1,
-  totalChars: CHAR_COUNT,
-};
+export const ATLAS_INFO = { gridSize: 1, totalChars: 1 };
 
 export function createCharAtlas(THREE) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, 1, 1);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.needsUpdate = true;
-  return texture;
+  const c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  c.getContext('2d').fillRect(0, 0, 1, 1);
+  const t = new THREE.CanvasTexture(c);
+  t.needsUpdate = true;
+  return t;
 }
 
 export const AsciiShader = {
@@ -52,179 +47,129 @@ export const AsciiShader = {
 
     varying vec2 vUv;
 
-    const float CELL_W = 12.0;
-    const float CELL_H = 16.0;
-    const vec3 PAPER = vec3(0.98, 0.976, 0.95);
-    const vec3 INK = vec3(0.05, 0.05, 0.07);
+    // ── Antiquarian palette ──────────────────────────
+    // Cream parchment, warm ochre, rich umber, dark ink
+    const vec3 PAPER   = vec3(0.95, 0.91, 0.84);
+    const vec3 MIDTONE = vec3(0.72, 0.58, 0.42);
+    const vec3 SHADOW  = vec3(0.22, 0.16, 0.11);
+    const vec3 INK     = vec3(0.08, 0.05, 0.03);
 
-    float luma(vec3 c) {
-      return dot(c, vec3(0.299, 0.587, 0.114));
-    }
+    float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
-    float rand(vec2 p) {
+    // ── Noise ────────────────────────────────────────
+    float hash(vec2 p) {
       return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
     }
 
-    // ── Sobel edge detection ──────────────────────────────────
-    // Sample at cell-scale spacing for cleaner edges
-    float sobelEdge(vec2 uv) {
-      vec2 texel = vec2(CELL_W, CELL_H) / resolution;
-
-      float tl = luma(texture2D(tDiffuse, uv + vec2(-texel.x,  texel.y)).rgb);
-      float tc = luma(texture2D(tDiffuse, uv + vec2(     0.0,  texel.y)).rgb);
-      float tr = luma(texture2D(tDiffuse, uv + vec2( texel.x,  texel.y)).rgb);
-      float ml = luma(texture2D(tDiffuse, uv + vec2(-texel.x,      0.0)).rgb);
-      float mr = luma(texture2D(tDiffuse, uv + vec2( texel.x,      0.0)).rgb);
-      float bl = luma(texture2D(tDiffuse, uv + vec2(-texel.x, -texel.y)).rgb);
-      float bc = luma(texture2D(tDiffuse, uv + vec2(     0.0, -texel.y)).rgb);
-      float br = luma(texture2D(tDiffuse, uv + vec2( texel.x, -texel.y)).rgb);
-
-      float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
-      float gy = -tl - 2.0*tc - tr + bl + 2.0*bc + br;
-
-      return sqrt(gx * gx + gy * gy);
+    float vnoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(
+        mix(hash(i), hash(i + vec2(1, 0)), f.x),
+        mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x),
+        f.y
+      );
     }
 
-    // ── 7x9 bitmap characters ─────────────────────────────────
-    // Larger glyphs for readability at 12x16 cells
-    float getBitmapPixel(int idx, int px, int py) {
-      if (px < 0 || px > 6 || py < 0 || py > 8) return 0.0;
-
-      if (idx == 0) {
-        // space
-        return 0.0;
-      }
-      else if (idx == 1) {
-        // .  — single dot at bottom
-        if (py == 7 && (px == 3)) return 1.0;
-        if (py == 8 && (px == 3)) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 2) {
-        // :  — two dots
-        if ((py == 2 || py == 3) && px == 3) return 1.0;
-        if ((py == 6 || py == 7) && px == 3) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 3) {
-        // -  — horizontal line
-        if (py == 4 && px >= 1 && px <= 5) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 4) {
-        // =  — double horizontal
-        if (py == 3 && px >= 1 && px <= 5) return 1.0;
-        if (py == 5 && px >= 1 && px <= 5) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 5) {
-        // +  — cross
-        if (py == 4 && px >= 1 && px <= 5) return 1.0;
-        if (px == 3 && py >= 2 && py <= 6) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 6) {
-        // *  — asterisk
-        if (py == 2 && (px == 1 || px == 5)) return 1.0;
-        if (py == 3 && (px == 2 || px == 4)) return 1.0;
-        if (py == 4 && px == 3) return 1.0;
-        if (py == 5 && (px == 2 || px == 4)) return 1.0;
-        if (py == 6 && (px == 1 || px == 5)) return 1.0;
-        if (py == 4 && px >= 1 && px <= 5) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 7) {
-        // #  — hash grid
-        if (px == 2 || px == 4) return 1.0;  // vertical bars
-        if (py == 3 || py == 5) {            // horizontal bars
-          if (px >= 0 && px <= 6) return 1.0;
-        }
-        return 0.0;
-      }
-      else if (idx == 8) {
-        // %  — percent
-        if (py == 0 && (px == 1 || px == 2)) return 1.0;
-        if (py == 1 && (px == 1 || px == 2 || px == 5)) return 1.0;
-        if (py == 2 && px == 4) return 1.0;
-        if (py == 3 && px == 4) return 1.0;
-        if (py == 4 && px == 3) return 1.0;
-        if (py == 5 && px == 2) return 1.0;
-        if (py == 6 && px == 2) return 1.0;
-        if (py == 7 && (px == 1 || px == 4 || px == 5)) return 1.0;
-        if (py == 8 && (px == 4 || px == 5)) return 1.0;
-        return 0.0;
-      }
-      else if (idx == 9) {
-        // @  — at sign (dense)
-        if (py == 1 && px >= 2 && px <= 4) return 1.0;
-        if (py == 2 && (px == 1 || px == 5)) return 1.0;
-        if (py == 3 && (px == 0 || px == 3 || px == 4 || px == 5 || px == 6)) return 1.0;
-        if (py == 4 && (px == 0 || px == 2 || px == 4 || px == 6)) return 1.0;
-        if (py == 5 && (px == 0 || px == 2 || px == 4 || px == 6)) return 1.0;
-        if (py == 6 && (px == 0 || px == 3 || px == 4 || px == 6)) return 1.0;
-        if (py == 7 && (px == 1 || px == 6)) return 1.0;
-        if (py == 8 && px >= 2 && px <= 5) return 1.0;
-        return 0.0;
-      }
-
-      return 0.0;
+    // ── Sobel edge detection ─────────────────────────
+    float sobel(vec2 uv, float scale) {
+      vec2 t = scale / resolution;
+      float tl = luma(texture2D(tDiffuse, uv + vec2(-t.x,  t.y)).rgb);
+      float tc = luma(texture2D(tDiffuse, uv + vec2( 0.0,  t.y)).rgb);
+      float tr = luma(texture2D(tDiffuse, uv + vec2( t.x,  t.y)).rgb);
+      float ml = luma(texture2D(tDiffuse, uv + vec2(-t.x,  0.0)).rgb);
+      float mr = luma(texture2D(tDiffuse, uv + vec2( t.x,  0.0)).rgb);
+      float bl = luma(texture2D(tDiffuse, uv + vec2(-t.x, -t.y)).rgb);
+      float bc = luma(texture2D(tDiffuse, uv + vec2( 0.0, -t.y)).rgb);
+      float br = luma(texture2D(tDiffuse, uv + vec2( t.x, -t.y)).rgb);
+      float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
+      float gy = -tl - 2.0*tc - tr + bl + 2.0*bc + br;
+      return sqrt(gx*gx + gy*gy);
     }
 
     void main() {
+      vec2 uv = gl_FragCoord.xy / resolution;
       vec2 pix = gl_FragCoord.xy;
 
-      // Cell coordinates
-      vec2 cellId = floor(vec2(pix.x / CELL_W, pix.y / CELL_H));
-      vec2 cellOrigin = vec2(cellId.x * CELL_W, cellId.y * CELL_H);
-      vec2 cellCenter = (cellOrigin + vec2(CELL_W * 0.5, CELL_H * 0.5)) / resolution;
+      // ── Sample scene ──────────────────────────────
+      vec3 scene = texture2D(tDiffuse, uv).rgb;
+      float l = luma(scene);
+      float presence = smoothstep(0.01, 0.06, l);
 
-      // Local pixel within cell -> bitmap coords
-      vec2 localPix = pix - cellOrigin;
-      // Center 7x9 glyph in 12x16 cell
-      int bx = int(floor(localPix.x - 2.5));
-      int by = int(floor(localPix.y - 3.5));
+      // ── Edge detection ────────────────────────────
+      // Two scales: bold silhouettes + fine detail
+      float edgeBold = sobel(uv, 1.5);
+      float edgeFine = sobel(uv, 0.6);
 
-      // ── Layer 1: Edge detection (LINEWORK — primary) ──────
-      float edge = sobelEdge(cellCenter);
-      // Aggressive edge sensitivity — edges are the star
-      float edgeVal = smoothstep(0.01, 0.08, edge) * 9.0;
+      // Pen-weight variation (organic wobble)
+      float penVar = vnoise(pix * 0.06) * 0.012;
 
-      // ── Layer 2: Shading (subtle fill — secondary) ────────
-      float l = luma(texture2D(tDiffuse, cellCenter).rgb);
-      // Shading is gentle: scale down and shift so only darker areas show
-      // Only surfaces with decent luminance get any shading at all
-      float shadeVal = l * 4.0;
+      float outline = 0.0;
+      outline += smoothstep(0.035 + penVar, 0.10, edgeBold);
+      outline += smoothstep(0.07 + penVar, 0.18, edgeFine) * 0.35;
+      outline = clamp(outline, 0.0, 1.0);
 
-      // ── Combine: edges dominate, shading fills in ─────────
-      float combined = max(edgeVal, shadeVal);
+      // Heavier ink in darker regions
+      outline *= mix(0.6, 1.0, smoothstep(0.5, 0.0, l));
 
-      // Per-cell jitter (+/- 0.6 char)
-      float h = rand(cellId);
-      float jitter = (h - 0.5) * 1.2;
+      // ── Tonal mapping ─────────────────────────────
+      // S-curve for print-like contrast
+      float t = clamp(l * 1.2 + 0.05, 0.0, 1.0);
+      t = t * t * (3.0 - 2.0 * t);
 
-      // Rare cycling cells (~0.4%)
-      float h2 = rand(cellId + 73.0);
-      if (h2 > 0.996) {
-        jitter = sin(time * 8.0 + h * 50.0) * 2.5;
+      // Map through the sepia palette
+      vec3 color = mix(SHADOW, MIDTONE, smoothstep(0.0, 0.45, t));
+      color = mix(color, PAPER, smoothstep(0.35, 0.9, t));
+
+      // Hint of scene color for room variety (~15%)
+      vec3 chroma = scene / (l + 0.01) - 1.0;
+      color += chroma * 0.06 * presence;
+
+      // ── Hatching (shadow regions only) ────────────
+      float darkness = smoothstep(0.45, 0.0, t);
+
+      if (darkness > 0.01) {
+        float w = vnoise(pix * 0.05) * 3.5;
+
+        // Primary diagonal strokes
+        float spacing = mix(7.0, 4.0, darkness);
+        float strokeLine = mod(pix.x - pix.y * 0.8 + w, spacing);
+        float strokeW = mix(0.3, 1.1, darkness);
+        float stroke = 1.0 - smoothstep(0.0, strokeW, strokeLine);
+
+        // Break strokes for hand-drawn feel
+        stroke *= step(0.22, vnoise(pix * 0.02 + 300.0));
+
+        color = mix(color, INK, stroke * darkness * 0.45 * presence);
+
+        // Cross-strokes in deepest shadows only
+        if (darkness > 0.55) {
+          float crossDark = smoothstep(0.55, 1.0, darkness);
+          float w2 = vnoise(pix * 0.04 + 80.0) * 3.0;
+          float crossLine = mod(pix.x + pix.y * 0.8 + w2, spacing * 1.2);
+          float crossStroke = 1.0 - smoothstep(0.0, strokeW * 0.8, crossLine);
+          crossStroke *= step(0.28, vnoise(pix * 0.025 + 500.0));
+          color = mix(color, INK, crossStroke * crossDark * 0.35 * presence);
+        }
       }
 
-      float charIndexF = clamp(combined + jitter, 0.0, 9.0);
-      int charIdx = int(floor(charIndexF));
+      // ── Apply edges ───────────────────────────────
+      color = mix(color, INK, outline * presence);
 
-      // Widen the "space" threshold — index 0 and 1 both become white paper
-      // This keeps light areas truly clean
-      if (charIdx <= 1) {
-        gl_FragColor = vec4(PAPER, 1.0);
-        return;
-      }
+      // ── Paper for void areas ──────────────────────
+      color = mix(PAPER, color, presence);
 
-      // Sample bitmap glyph
-      float inkHit = getBitmapPixel(charIdx, bx, by);
+      // ── Paper grain ───────────────────────────────
+      float grain = (vnoise(pix * 0.35) - 0.5) * 0.022;
+      grain += (vnoise(pix * 1.8) - 0.5) * 0.010;
+      color += grain;
 
-      // Pure black on white — no color, no tint
-      vec3 color = mix(PAPER, INK, inkHit);
+      // ── Vignette ──────────────────────────────────
+      vec2 vc = (uv - 0.5) * vec2(1.0, 1.15);
+      color *= 1.0 - 0.28 * dot(vc, vc);
 
-      gl_FragColor = vec4(color, 1.0);
+      gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
     }
   `
 };

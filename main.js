@@ -1,16 +1,31 @@
 import * as THREE from 'three';
 import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
-const CELL_SIZE = 12; // pixel width of each ASCII cell (height is 16, set in shader)
+const CELL_SIZE = 10; // cell width; height is 14 (set in shader)
 import { NetworkClient } from './client/network.js';
 import { PlayerManager } from './client/players.js';
 import { ChatUI } from './client/chat.js';
-import { createPuzzleOverlay, showPuzzle, hidePuzzle, showPuzzleResult } from './client/puzzle-ui.js';
-import { generateBabelText, getWallInscription } from './shared/babel-text.js';
+import { HUD } from './client/hud.js';
+import { PortalManager } from './client/portal-ui.js';
+import { buildRoom, updateRoomAnimations } from './client/room-renderer.js';
+import { generateBabelText } from './shared/babel-text.js';
 import {
-  TOWER_RADIUS, FLOOR_HEIGHT, TAPER_PER_FLOOR, PLAYER_HEIGHT,
-  MOVE_SPEED, JUMP_FORCE, GRAVITY, MOUSE_SENSITIVITY,
-  PUZZLE_INTERACT_DISTANCE, ASCII_CHAR_SIZE, INITIAL_FLOORS,
+  PLAYER_HEIGHT, MOVE_SPEED, JUMP_FORCE, GRAVITY,
+  MOUSE_SENSITIVITY, PLAYER_RADIUS, BASE_ROOM_RADIUS,
+  ROOM_HEIGHT, ROOM_CATEGORIES,
 } from './shared/constants.js';
+
+// ─── Platformer Physics Tuning ──────────────────────────────────────
+const COYOTE_TIME = 0.1;           // seconds after leaving edge you can still jump
+const JUMP_BUFFER_TIME = 0.1;      // seconds before landing that jump input is remembered
+const JUMP_CUT_MULTIPLIER = 0.35;  // velocity multiplier when releasing jump early
+const WALL_SLIDE_SPEED = -6;       // max downward speed when wall sliding
+const WALL_JUMP_FORCE_Y = JUMP_FORCE * 1.0;
+const WALL_JUMP_FORCE_XZ = MOVE_SPEED * 0.8;
+const RESPAWN_Y = -20;             // fall below this = respawn
+const GROUND_ACCEL = 50;           // how fast you reach full speed on ground (higher = snappier)
+const GROUND_DECEL = 40;           // how fast you stop on ground (higher = less slippery)
+const AIR_ACCEL = 8;               // air acceleration (lower = more committed jumps)
+const AIR_DECEL = 3;               // air deceleration (low = momentum-preserving)
 
 // ─── State ───────────────────────────────────────────────────────────
 const state = {
@@ -18,31 +33,39 @@ const state = {
   scene: null,
   renderer: null,
   clock: new THREE.Clock(),
-  movement: { forward: false, backward: false, left: false, right: false },
+  movement: { forward: false, backward: false, left: false, right: false, jump: false },
   euler: new THREE.Euler(0, 0, 0, 'YXZ'),
   velocity: new THREE.Vector3(),
   locked: false,
   asciiEnabled: true,
   onGround: false,
+  // Platformer physics
+  coyoteTimer: 0,          // time since last grounded (allows late jumps)
+  jumpBufferTimer: 0,      // time since jump pressed (allows early jumps)
+  jumpHeld: false,          // is jump key still held (variable jump height)
+  wallSlideDir: 0,          // -1 or 1 if wall sliding, 0 if not
+  lastWallNormalX: 0,
+  lastWallNormalZ: 0,
   // Post-processing
   renderTarget: null,
   asciiMaterial: null,
   asciiScene: null,
   asciiCamera: null,
-  // Game state
-  towerHeight: INITIAL_FLOORS,
-  growthPointMeshes: [],
-  growthPointsData: [],
-  nearestGrowthPoint: null,
-  solvingPuzzle: false,
-  currentGrowthPointId: null,
-  towerGroup: null,
+  // Room state
+  roomGroup: null,
+  roomPortals: [],
+  roomPlatforms: [],
+  roomRadius: BASE_ROOM_RADIUS,
+  roomHeight: ROOM_HEIGHT,
+  currentArticle: null,
 };
 
 // ─── Modules ─────────────────────────────────────────────────────────
 let network = null;
 let playerManager = null;
 let chatUI = null;
+let hud = null;
+let portalManager = null;
 
 // ─── Init ────────────────────────────────────────────────────────────
 function init() {
@@ -53,43 +76,37 @@ function init() {
   state.renderer.setClearColor(0x000000);
   document.body.appendChild(state.renderer.domElement);
 
-  // Scene — dark background, shader renders as black-on-white
+  // Scene
   state.scene = new THREE.Scene();
   state.scene.background = new THREE.Color(0x000000);
-  state.scene.fog = new THREE.FogExp2(0x000000, 0.002);
+  state.scene.fog = new THREE.FogExp2(0x000000, 0.008);
 
   // Camera
   state.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
-  state.camera.position.set(0, PLAYER_HEIGHT, TOWER_RADIUS * 0.6);
+  state.camera.position.set(0, PLAYER_HEIGHT, 0);
 
   // Post-processing
   setupAsciiPostProcessing();
 
-  // Build the tower
-  buildTower(state.towerHeight);
-
-  // Lighting
+  // Lighting (will be adjusted per room)
   setupLighting();
 
-  // Spawn initial growth points (will be replaced by server data)
-  spawnGrowthPoints();
-
-  // Player manager
+  // Modules
   playerManager = new PlayerManager(state.scene);
+  hud = new HUD();
+  portalManager = new PortalManager();
 
-  // Puzzle overlay
-  createPuzzleOverlay();
+  portalManager.onEnterPortal = (targetArticle) => {
+    loadArticle(targetArticle);
+  };
 
   // Controls
   setupControls();
 
-  // HUD
-  createHUD();
-
   // Resize
   window.addEventListener('resize', onResize);
 
-  // Connect to server
+  // Connect to server (or run offline)
   connectToServer();
 
   // Go
@@ -107,7 +124,6 @@ function setupAsciiPostProcessing() {
     format: THREE.RGBAFormat,
   });
 
-  // Character atlas: 1024x1024, 16x16 grid of glyphs
   const charAtlas = createCharAtlas(THREE);
 
   state.asciiMaterial = new THREE.ShaderMaterial({
@@ -132,206 +148,114 @@ function setupAsciiPostProcessing() {
   state.asciiScene.add(new THREE.Mesh(quad, state.asciiMaterial));
 }
 
-// ─── Tower Construction ──────────────────────────────────────────────
-function buildTower(numFloors) {
-  if (state.towerGroup) {
-    state.scene.remove(state.towerGroup);
-  }
-
-  const towerGroup = new THREE.Group();
-  state.towerGroup = towerGroup;
-
-  const stoneMat = new THREE.MeshLambertMaterial({ color: 0xeeddcc });
-  const darkStoneMat = new THREE.MeshLambertMaterial({ color: 0xccbbaa });
-  const edgeMat = new THREE.MeshLambertMaterial({ color: 0xddccbb });
-
-  // Ground
-  const groundGeo = new THREE.PlaneGeometry(500, 500);
-  const groundMat = new THREE.MeshLambertMaterial({ color: 0xbbaa99 });
-  const ground = new THREE.Mesh(groundGeo, groundMat);
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.5;
-  towerGroup.add(ground);
-
-  for (let floor = 0; floor < numFloors; floor++) {
-    const y = floor * FLOOR_HEIGHT;
-    const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
-    const segments = 24;
-
-    // Floor ring
-    const outerR = radius;
-    const innerR = radius * 0.3;
-    const ringGeo = new THREE.RingGeometry(innerR, outerR, segments);
-    const floorMesh = new THREE.Mesh(ringGeo, floor % 2 === 0 ? stoneMat : darkStoneMat);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = y;
-    floorMesh.userData.isFloor = true;
-    floorMesh.userData.floorNum = floor;
-    towerGroup.add(floorMesh);
-
-    // Ceiling for the floor below (thin slab)
-    if (floor > 0) {
-      const ceilGeo = new THREE.RingGeometry(innerR, outerR, segments);
-      const ceilMesh = new THREE.Mesh(ceilGeo, darkStoneMat);
-      ceilMesh.rotation.x = Math.PI / 2;
-      ceilMesh.position.y = y - 0.1;
-      towerGroup.add(ceilMesh);
-    }
-
-    // Outer wall columns
-    for (let i = 0; i < segments; i++) {
-      const angle = (i / segments) * Math.PI * 2;
-      const x = Math.cos(angle) * outerR;
-      const z = Math.sin(angle) * outerR;
-
-      const colGeo = new THREE.BoxGeometry(2, FLOOR_HEIGHT * 0.9, 2);
-      const col = new THREE.Mesh(colGeo, edgeMat);
-      col.position.set(x, y + FLOOR_HEIGHT * 0.45, z);
-      towerGroup.add(col);
-    }
-
-    // Wall panels between columns (every other gap)
-    for (let i = 0; i < segments; i += 2) {
-      const angle1 = (i / segments) * Math.PI * 2;
-      const angle2 = ((i + 1) / segments) * Math.PI * 2;
-      const midAngle = (angle1 + angle2) / 2;
-      const wallWidth = 2 * outerR * Math.sin(Math.PI / segments);
-
-      const wallGeo = new THREE.PlaneGeometry(wallWidth, FLOOR_HEIGHT * 0.8);
-      const wallMesh = new THREE.Mesh(wallGeo, darkStoneMat);
-      wallMesh.position.set(
-        Math.cos(midAngle) * (outerR - 0.5),
-        y + FLOOR_HEIGHT * 0.45,
-        Math.sin(midAngle) * (outerR - 0.5)
-      );
-      wallMesh.rotation.y = -midAngle + Math.PI / 2;
-      towerGroup.add(wallMesh);
-    }
-
-    // Inner columns
-    for (let i = 0; i < 8; i++) {
-      const angle = (i / 8) * Math.PI * 2 + floor * 0.2;
-      const x = Math.cos(angle) * innerR;
-      const z = Math.sin(angle) * innerR;
-
-      const colGeo = new THREE.BoxGeometry(1.5, FLOOR_HEIGHT * 0.9, 1.5);
-      const col = new THREE.Mesh(colGeo, darkStoneMat);
-      col.position.set(x, y + FLOOR_HEIGHT * 0.45, z);
-      towerGroup.add(col);
-    }
-
-    // Spiral ramp
-    const rampAngleStart = floor * (Math.PI / 4);
-    const rampSegments = 16;
-    for (let s = 0; s < rampSegments; s++) {
-      const t = s / rampSegments;
-      const angle = rampAngleStart + t * (Math.PI / 2);
-      const rampR = (innerR + outerR) * 0.5;
-      const rx = Math.cos(angle) * rampR;
-      const rz = Math.sin(angle) * rampR;
-      const ry = y + t * FLOOR_HEIGHT;
-
-      const stepGeo = new THREE.BoxGeometry(5, 0.5, 4);
-      const step = new THREE.Mesh(stepGeo, stoneMat);
-      step.position.set(rx, ry, rz);
-      step.rotation.y = -angle;
-      step.userData.isRamp = true;
-      step.userData.rampY = ry;
-      towerGroup.add(step);
-    }
-  }
-
-  state.scene.add(towerGroup);
-}
-
 // ─── Lighting ────────────────────────────────────────────────────────
 function setupLighting() {
-  const ambient = new THREE.AmbientLight(0xffffff, 1.2);
+  const ambient = new THREE.AmbientLight(0xffffff, 1.0);
   state.scene.add(ambient);
 
-  // Strong directional from above-right for clear shadows
-  const dir = new THREE.DirectionalLight(0xffffff, 1.5);
-  dir.position.set(30, 120, 40);
+  const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+  dir.position.set(10, 30, 10);
   state.scene.add(dir);
 
-  // Soft fill from opposite side
-  const fill = new THREE.DirectionalLight(0xeeeeff, 0.6);
-  fill.position.set(-30, 60, -20);
+  const fill = new THREE.DirectionalLight(0xeeeeff, 0.4);
+  fill.position.set(-10, 20, -10);
   state.scene.add(fill);
 
-  // Interior point lights every 2 floors
-  for (let i = 0; i < state.towerHeight; i += 2) {
-    const light = new THREE.PointLight(0xffeedd, 1.0, FLOOR_HEIGHT * 6);
-    light.position.set(0, i * FLOOR_HEIGHT + FLOOR_HEIGHT * 0.5, 0);
-    state.scene.add(light);
+  // Central room light
+  const center = new THREE.PointLight(0xffeedd, 0.8, ROOM_HEIGHT * 3);
+  center.position.set(0, ROOM_HEIGHT * 0.7, 0);
+  state.scene.add(center);
+}
+
+// ─── Room Loading ────────────────────────────────────────────────────
+
+function loadRoom(articleData) {
+  // Remove old room
+  if (state.roomGroup) {
+    state.scene.remove(state.roomGroup);
+    state.roomGroup = null;
+  }
+
+  // Build new room
+  const { group, portals, platforms, radius, height } = buildRoom(articleData);
+  state.roomGroup = group;
+  state.roomPortals = portals;
+  state.roomPlatforms = platforms || [];
+  state.roomRadius = radius;
+  state.roomHeight = height || ROOM_HEIGHT;
+  state.currentArticle = articleData.title;
+  state.scene.add(group);
+
+  // Update portal manager
+  portalManager.setPortals(portals);
+  portalManager.transitionComplete();
+
+  // Update HUD
+  hud.setArticle(articleData.title);
+
+  // Reset player position to room center
+  state.camera.position.set(0, PLAYER_HEIGHT, 0);
+  state.velocity.set(0, 0, 0);
+
+  console.log(`[Game] Loaded room: ${articleData.title} (${portals.length} portals)`);
+}
+
+function loadArticle(title) {
+  if (network && network.connected) {
+    network.enterPortal(title);
+  } else {
+    // Offline: use hardcoded fallback
+    loadOfflineArticle(title);
   }
 }
 
-// ─── Growth Points ───────────────────────────────────────────────────
-function spawnGrowthPoints(serverPoints) {
-  // Clear existing
-  state.growthPointMeshes.forEach(m => state.scene.remove(m));
-  state.growthPointMeshes = [];
-  state.growthPointsData = [];
+// ─── Offline Mode (hardcoded articles for testing) ───────────────────
 
-  const points = serverPoints || generateDefaultGrowthPoints();
+const OFFLINE_ARTICLES = {
+  'Library of Babel': {
+    title: 'Library of Babel',
+    extract: 'The Library of Babel is a short story by Argentine author and librarian Jorge Luis Borges, conceiving of a universe in the form of a vast library containing all possible 410-page books of a certain format and character set.',
+    links: ['Jorge Luis Borges', 'Universe', 'Book', 'Infinity', 'Mathematics', 'Philosophy'],
+    category: 'art',
+    linkCount: 42,
+  },
+  'Jorge Luis Borges': {
+    title: 'Jorge Luis Borges',
+    extract: 'Jorge Francisco Isidoro Luis Borges Acevedo was an Argentine short-story writer, essayist, poet and translator, and a key figure in Spanish-language and international literature.',
+    links: ['Argentina', 'Short story', 'Library of Babel', 'Poetry', 'Literature', 'Buenos Aires'],
+    category: 'art',
+    linkCount: 35,
+  },
+  'Universe': {
+    title: 'Universe',
+    extract: 'The universe is all of space and time and their contents, including planets, stars, galaxies, and all other forms of matter and energy.',
+    links: ['Space', 'Time', 'Galaxy', 'Star', 'Planet', 'Big Bang', 'Dark matter', 'Library of Babel'],
+    category: 'science',
+    linkCount: 60,
+  },
+  'Philosophy': {
+    title: 'Philosophy',
+    extract: 'Philosophy is the systematized study of general and fundamental questions, such as those about existence, reason, knowledge, values, mind, and language.',
+    links: ['Existence', 'Knowledge', 'Ethics', 'Logic', 'Metaphysics', 'Library of Babel'],
+    category: 'default',
+    linkCount: 50,
+  },
+};
 
-  points.forEach(gp => {
-    const geo = new THREE.SphereGeometry(2.2, 16, 16);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.85,
+function loadOfflineArticle(title) {
+  const data = OFFLINE_ARTICLES[title];
+  if (data) {
+    loadRoom(data);
+  } else {
+    // Generate a generic room for unknown articles
+    loadRoom({
+      title,
+      extract: `This is the room for "${title}". In the full game, this room would be generated from the Wikipedia article's content.`,
+      links: Object.keys(OFFLINE_ARTICLES),
+      category: 'default',
+      linkCount: 6,
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(gp.x, gp.y, gp.z);
-    mesh.userData.isGrowthPoint = true;
-    mesh.userData.growthPointId = gp.id;
-    mesh.userData.pulseOffset = Math.random() * Math.PI * 2;
-
-    // Inner core — bright white for strong ASCII rendering
-    const innerGeo = new THREE.SphereGeometry(1.2, 8, 8);
-    const innerMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 1.0,
-    });
-    const inner = new THREE.Mesh(innerGeo, innerMat);
-    mesh.add(inner);
-
-    // Strong point light so they glow visibly in the ASCII shader
-    const light = new THREE.PointLight(0xffffff, 1.5, 20);
-    mesh.add(light);
-
-    state.scene.add(mesh);
-    state.growthPointMeshes.push(mesh);
-    state.growthPointsData.push(gp);
-  });
-}
-
-function generateDefaultGrowthPoints() {
-  const points = [];
-  // Spread growth points across multiple floors including ground level
-  const floors = [0, 1, Math.max(0, state.towerHeight - 1), state.towerHeight];
-  const uniqueFloors = [...new Set(floors)];
-  uniqueFloors.forEach(floor => {
-    const count = floor <= 1 ? 4 : 3; // more on ground floors for easy access
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.3;
-      const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
-      const r = radius * (0.3 + Math.random() * 0.4);
-      points.push({
-        id: `gp_${floor}_${i}`,
-        floor,
-        x: Math.cos(angle) * r,
-        y: floor * FLOOR_HEIGHT + 2,
-        z: Math.sin(angle) * r,
-        active: true,
-        solvesRemaining: 3,
-      });
-    }
-  });
-  return points;
+  }
 }
 
 // ─── Controls ────────────────────────────────────────────────────────
@@ -343,9 +267,8 @@ function setupControls() {
     document.body.requestPointerLock();
   });
 
-  // Also re-lock on clicking the canvas after tabbing back
   document.addEventListener('click', (e) => {
-    if (hasEnteredOnce && !state.locked && !state.solvingPuzzle &&
+    if (hasEnteredOnce && !state.locked &&
         !(chatUI && chatUI.visible) && e.target.tagName === 'CANVAS') {
       document.body.requestPointerLock();
     }
@@ -358,14 +281,11 @@ function setupControls() {
       hasEnteredOnce = true;
     }
 
-    // Don't show blocker when chatting or solving puzzle
-    if (state.solvingPuzzle || (chatUI && chatUI.visible)) {
+    if (chatUI && chatUI.visible) {
       blocker.style.display = 'none';
     } else if (!hasEnteredOnce) {
-      // First time: show full title screen blocker
       blocker.style.display = state.locked ? 'none' : 'flex';
     } else {
-      // After first entry: hide blocker, just show small resume hint
       blocker.style.display = 'none';
       if (!state.locked) {
         showResumeHint();
@@ -385,10 +305,7 @@ function setupControls() {
   });
 
   document.addEventListener('keydown', (e) => {
-    // Don't process movement while chatting
     if (chatUI && chatUI.visible) return;
-    // Don't process movement while solving puzzle
-    if (state.solvingPuzzle) return;
 
     switch (e.code) {
       case 'KeyW': case 'ArrowUp':    state.movement.forward = true; break;
@@ -396,14 +313,13 @@ function setupControls() {
       case 'KeyA': case 'ArrowLeft':  state.movement.left = true; break;
       case 'KeyD': case 'ArrowRight': state.movement.right = true; break;
       case 'Space':
-        if (state.onGround) state.velocity.y = JUMP_FORCE;
+        state.movement.jump = true;
+        state.jumpHeld = true;
+        state.jumpBufferTimer = JUMP_BUFFER_TIME;
         e.preventDefault();
         break;
       case 'Backquote':
         state.asciiEnabled = !state.asciiEnabled;
-        break;
-      case 'KeyE':
-        interactWithGrowthPoint();
         break;
       case 'KeyT':
         if (chatUI && !chatUI.visible) {
@@ -420,113 +336,12 @@ function setupControls() {
       case 'KeyS': case 'ArrowDown':  state.movement.backward = false; break;
       case 'KeyA': case 'ArrowLeft':  state.movement.left = false; break;
       case 'KeyD': case 'ArrowRight': state.movement.right = false; break;
+      case 'Space':
+        state.movement.jump = false;
+        state.jumpHeld = false;
+        break;
     }
   });
-}
-
-// ─── Growth Point Interaction ────────────────────────────────────────
-function interactWithGrowthPoint() {
-  if (state.solvingPuzzle) return;
-  if (!state.nearestGrowthPoint) return;
-
-  const gp = state.nearestGrowthPoint;
-  state.solvingPuzzle = true;
-  state.currentGrowthPointId = gp.userData.growthPointId;
-
-  // Exit pointer lock for puzzle UI
-  if (document.pointerLockElement) {
-    document.exitPointerLock();
-  }
-
-  if (network && network.connected) {
-    // Request puzzle from server
-    network.requestPuzzle(gp.userData.growthPointId);
-  } else {
-    // Offline mode: cycle through new puzzle types for testing
-    const offlinePuzzles = [
-      {
-        type: 'cipher_wall',
-        data: {
-          key: {'◆':'t','●':'h','▲':'e','■':'s','★':'u','⬢':'n'},
-          encoded: ['◆','●','▲',' ','■','★','⬢'],
-          phraseLength: 7,
-        },
-      },
-      {
-        type: 'inscription',
-        data: {
-          fragments: [
-            {id: 2, text: 'core of a'},
-            {id: 0, text: 'is the collapsed'},
-            {id: 3, text: 'massive supergiant'},
-            {id: 1, text: 'A neutron star'},
-          ],
-          numSlots: 4,
-        },
-      },
-      {
-        type: 'rune_lock',
-        data: {
-          rings: [['◇','◆','●','▲','■'], ['○','★','⬢','△','□']],
-          target: ['◆','★'],
-          keyholeIndex: 0,
-        },
-      },
-      {
-        type: 'seal_breaking',
-        data: {
-          nodes: [
-            {id:0, x:180, y:60, lit:false, label:'B'},
-            {id:1, x:290, y:150, lit:true, label:'A'},
-            {id:2, x:250, y:280, lit:false, label:'B'},
-            {id:3, x:110, y:280, lit:true, label:'E'},
-            {id:4, x:70, y:150, lit:false, label:'L'},
-          ],
-          edges: [{from:0,to:1},{from:1,to:2},{from:2,to:3},{from:3,to:4},{from:4,to:0}],
-          revealText: 'BABEL',
-        },
-      },
-      {
-        type: 'glyph_trace',
-        data: { gridSize: 3, dots: Array.from({length:9},(_,i)=>({row:Math.floor(i/3),col:i%3,id:i})), pathLength: 9 },
-      },
-    ];
-    const puzzle = offlinePuzzles[Math.floor(Math.random() * offlinePuzzles.length)];
-    showPuzzle(puzzle, (answer) => {
-      handlePuzzleSubmit(answer);
-    }, () => {
-      cancelPuzzle();
-    });
-  }
-}
-
-function handlePuzzleSubmit(answer) {
-  if (network && network.connected) {
-    network.submitSolution(state.currentGrowthPointId, answer);
-  } else {
-    // Offline: always succeed for testing
-    showPuzzleResult(true);
-    setTimeout(() => {
-      state.solvingPuzzle = false;
-      // Remove the growth point
-      const idx = state.growthPointMeshes.findIndex(
-        m => m.userData.growthPointId === state.currentGrowthPointId
-      );
-      if (idx >= 0) {
-        state.scene.remove(state.growthPointMeshes[idx]);
-        state.growthPointMeshes.splice(idx, 1);
-      }
-    }, 2000);
-  }
-}
-
-function cancelPuzzle() {
-  state.solvingPuzzle = false;
-  state.currentGrowthPointId = null;
-  hidePuzzle();
-  if (network && network.connected) {
-    network.cancelPuzzle();
-  }
 }
 
 // ─── Network ─────────────────────────────────────────────────────────
@@ -534,66 +349,54 @@ async function connectToServer() {
   network = new NetworkClient();
   chatUI = new ChatUI(network);
 
-  // Determine WebSocket URL — use same host in dev, or configured server in prod
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = window.BABEL_SERVER_URL || `${protocol}//${location.host}`;
 
   network.onInitState = (data) => {
     console.log('[Game] Init state received:', data);
-    state.towerHeight = data.towerHeight;
-    buildTower(data.towerHeight);
-    setupLighting();
-    spawnGrowthPoints(data.growthPoints);
-    updateHUD();
+  };
+
+  network.onWordPair = (data) => {
+    console.log('[Game] Word pair:', data.start, '→', data.target);
+    hud.resetJourney();
+    hud.setTarget(data.target);
+  };
+
+  network.onArticleData = (data) => {
+    console.log('[Game] Article data received:', data.title);
+    loadRoom(data);
+  };
+
+  network.onArticleError = (data) => {
+    console.warn('[Game] Article error:', data.message);
+    portalManager.transitionComplete();
+  };
+
+  network.onJourneyComplete = async (data) => {
+    console.log('[Game] Journey complete!', data);
+    // Show win overlay, wait for dismissal, then request new pair
+    if (document.pointerLockElement) document.exitPointerLock();
+    await hud.showWin(data);
+    hud.resetJourney();
+    network.requestNewPair();
   };
 
   network.onPlayerJoin = (sessionId, color) => {
     playerManager.addPlayer(sessionId, color);
-    updateHUD();
+    hud.setPlayerCount(playerManager.getPlayerCount() + 1);
   };
 
   network.onPlayerLeave = (sessionId) => {
     playerManager.removePlayer(sessionId);
-    updateHUD();
+    hud.setPlayerCount(playerManager.getPlayerCount() + 1);
   };
 
   network.onPlayerMove = (sessionId, x, y, z, rotationY) => {
     playerManager.updatePosition(sessionId, x, y, z, rotationY);
   };
 
-  network.onPuzzleReceived = (data) => {
-    if (data.error) {
-      console.warn('[Game] Puzzle error:', data.error);
-      state.solvingPuzzle = false;
-      return;
-    }
-    showPuzzle(data, (answer) => {
-      handlePuzzleSubmit(answer);
-    }, () => {
-      cancelPuzzle();
-    });
-  };
-
-  network.onPuzzleResult = (data) => {
-    showPuzzleResult(data.success, data.revealText);
-    setTimeout(() => {
-      state.solvingPuzzle = false;
-      state.currentGrowthPointId = null;
-    }, data.success ? 2500 : 1500);
-  };
-
-  network.onTowerGrow = (data) => {
-    console.log('[Game] Tower grew to floor', data.floor);
-    state.towerHeight = data.floor;
-    buildTower(data.floor);
-    setupLighting();
-    spawnGrowthPoints(data.growthPoints);
-    showGrowthFlash();
-    updateHUD();
-  };
-
-  network.onGrowthPointsUpdate = (data) => {
-    spawnGrowthPoints(data.growthPoints);
+  network.onPlayerArticleChange = (sessionId, article) => {
+    playerManager.setPlayerArticle(sessionId, article);
   };
 
   network.onChatBubble = (data) => {
@@ -604,11 +407,12 @@ async function connectToServer() {
   const connected = await network.connect(wsUrl);
   if (!connected) {
     console.log('[Game] Running in offline mode');
-    updateHUD();
+    // Load starting room offline
+    loadOfflineArticle('Library of Babel');
   }
 }
 
-// ─── Resume Hint (shown when pointer lock lost after first entry) ────
+// ─── Resume Hint ─────────────────────────────────────────────────────
 function showResumeHint() {
   let hint = document.getElementById('resume-hint');
   if (!hint) {
@@ -630,54 +434,11 @@ function hideResumeHint() {
   if (hint) hint.style.display = 'none';
 }
 
-// ─── HUD ─────────────────────────────────────────────────────────────
-function createHUD() {
-  const hud = document.createElement('div');
-  hud.id = 'hud';
-  hud.innerHTML = `
-    <div id="hud-height">FLOOR: 0</div>
-    <div id="hud-players">BUILDERS: 1</div>
-    <div id="hud-interact" style="display:none">[E] INTERACT</div>
-    <div id="hud-controls">WASD move | SPACE jump | E interact | T chat | \` toggle ASCII</div>
-  `;
-  document.body.appendChild(hud);
-}
-
-function updateHUD() {
-  const heightEl = document.getElementById('hud-height');
-  const playersEl = document.getElementById('hud-players');
-  if (heightEl) {
-    const playerFloor = Math.floor(
-      (state.camera.position.y - PLAYER_HEIGHT) / FLOOR_HEIGHT
-    );
-    heightEl.textContent = `FLOOR: ${playerFloor} / ${state.towerHeight}`;
-  }
-  if (playersEl) {
-    const count = playerManager ? playerManager.getPlayerCount() + 1 : 1;
-    playersEl.textContent = `BUILDERS: ${count}`;
-  }
-}
-
-// ─── Growth Flash (when tower grows) ─────────────────────────────────
-function showGrowthFlash() {
-  const flash = document.createElement('div');
-  flash.id = 'growth-flash';
-  flash.textContent = 'THE TOWER GROWS';
-  document.body.appendChild(flash);
-
-  setTimeout(() => flash.classList.add('visible'), 10);
-  setTimeout(() => {
-    flash.classList.remove('visible');
-    setTimeout(() => flash.remove(), 1000);
-  }, 2000);
-}
-
 // ─── Physics / Movement ──────────────────────────────────────────────
-const PLAYER_RADIUS = 1.5; // collision radius
-
 function updateMovement(dt) {
   if (!state.locked) return;
 
+  // ─── Input direction ──────────────────────────────────────
   const dir = new THREE.Vector3();
   const forward = new THREE.Vector3();
   const right = new THREE.Vector3();
@@ -691,112 +452,150 @@ function updateMovement(dt) {
   if (state.movement.backward) dir.sub(forward);
   if (state.movement.left) dir.sub(right);
   if (state.movement.right) dir.add(right);
-
   if (dir.length() > 0) dir.normalize();
 
-  state.velocity.x = dir.x * MOVE_SPEED;
-  state.velocity.z = dir.z * MOVE_SPEED;
+  // ─── Horizontal movement (snappy ground, momentum in air) ──
+  const targetVx = dir.x * MOVE_SPEED;
+  const targetVz = dir.z * MOVE_SPEED;
+  const hasInput = dir.length() > 0.01;
+
+  if (state.onGround) {
+    // Ground: snap to target speed quickly, stop fast
+    const rate = hasInput ? GROUND_ACCEL : GROUND_DECEL;
+    state.velocity.x += (targetVx - state.velocity.x) * Math.min(1, rate * dt);
+    state.velocity.z += (targetVz - state.velocity.z) * Math.min(1, rate * dt);
+  } else {
+    // Air: slower steering, preserve momentum
+    const rate = hasInput ? AIR_ACCEL : AIR_DECEL;
+    state.velocity.x += (targetVx - state.velocity.x) * Math.min(1, rate * dt);
+    state.velocity.z += (targetVz - state.velocity.z) * Math.min(1, rate * dt);
+  }
+
+  // ─── Timers ───────────────────────────────────────────────
+  state.coyoteTimer -= dt;
+  state.jumpBufferTimer -= dt;
+
+  if (state.onGround) {
+    state.coyoteTimer = COYOTE_TIME;
+  }
+
+  // ─── Jump logic ───────────────────────────────────────────
+  const canJump = state.coyoteTimer > 0;
+  const wantsJump = state.jumpBufferTimer > 0;
+
+  if (canJump && wantsJump) {
+    state.velocity.y = JUMP_FORCE;
+    state.coyoteTimer = 0;
+    state.jumpBufferTimer = 0;
+    state.onGround = false;
+  }
+
+  // Variable jump height — cut velocity short when releasing
+  if (!state.jumpHeld && state.velocity.y > 0) {
+    state.velocity.y *= JUMP_CUT_MULTIPLIER;
+  }
+
+  // ─── Wall slide & wall jump ───────────────────────────────
+  state.wallSlideDir = 0;
+  const wallLimit = state.roomRadius - PLAYER_RADIUS - 1.5;
+  const distFromCenter = Math.sqrt(
+    state.camera.position.x ** 2 + state.camera.position.z ** 2
+  );
+
+  if (!state.onGround && distFromCenter > wallLimit - 0.5 && state.velocity.y < 0) {
+    // Touching wall while falling — wall slide
+    state.wallSlideDir = 1;
+    state.velocity.y = Math.max(state.velocity.y, WALL_SLIDE_SPEED);
+    state.lastWallNormalX = -state.camera.position.x / distFromCenter;
+    state.lastWallNormalZ = -state.camera.position.z / distFromCenter;
+
+    // Wall jump
+    if (wantsJump) {
+      state.velocity.y = WALL_JUMP_FORCE_Y;
+      state.velocity.x = state.lastWallNormalX * WALL_JUMP_FORCE_XZ;
+      state.velocity.z = state.lastWallNormalZ * WALL_JUMP_FORCE_XZ;
+      state.jumpBufferTimer = 0;
+      state.coyoteTimer = 0;
+    }
+  }
+
+  // ─── Gravity ──────────────────────────────────────────────
   state.velocity.y += GRAVITY * dt;
 
-  // Proposed new position
-  const newX = state.camera.position.x + state.velocity.x * dt;
-  const newZ = state.camera.position.z + state.velocity.z * dt;
-  const newY = state.camera.position.y + state.velocity.y * dt;
+  // ─── Apply velocity ───────────────────────────────────────
+  let newX = state.camera.position.x + state.velocity.x * dt;
+  let newZ = state.camera.position.z + state.velocity.z * dt;
+  let newY = state.camera.position.y + state.velocity.y * dt;
 
-  // ─── Wall / Column collision ─────────────────────────────────
-  const py = state.camera.position.y - PLAYER_HEIGHT;
-  let blockedX = false;
-  let blockedZ = false;
-
-  // Check against outer walls (cylindrical boundary per floor)
-  for (let floor = 0; floor < state.towerHeight; floor++) {
-    const floorY = floor * FLOOR_HEIGHT;
-    const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
-
-    // Only check floors near the player's height
-    if (py < floorY - 2 || py > floorY + FLOOR_HEIGHT) continue;
-
-    const distNew = Math.sqrt(newX * newX + newZ * newZ);
-
-    // Outer wall: can't go outside the tower radius
-    if (distNew > radius - PLAYER_RADIUS) {
-      // Push back inside
-      const angle = Math.atan2(newZ, newX);
-      const maxR = radius - PLAYER_RADIUS;
-      const clampedX = Math.cos(angle) * maxR;
-      const clampedZ = Math.sin(angle) * maxR;
-
-      // Only clamp if we were inside before (don't trap outside players)
-      const distCur = Math.sqrt(state.camera.position.x ** 2 + state.camera.position.z ** 2);
-      if (distCur < radius) {
-        if (Math.abs(newX - clampedX) > 0.01) blockedX = true;
-        if (Math.abs(newZ - clampedZ) > 0.01) blockedZ = true;
-      }
-    }
-
-    // Inner wall: can't go inside the inner column ring
-    const innerR = radius * 0.3;
-    if (distNew < innerR + PLAYER_RADIUS && distNew > 0) {
-      const distCur = Math.sqrt(state.camera.position.x ** 2 + state.camera.position.z ** 2);
-      if (distCur > innerR) {
-        blockedX = true;
-        blockedZ = true;
-      }
-    }
+  // ─── Room boundary collision ──────────────────────────────
+  const newDist = Math.sqrt(newX * newX + newZ * newZ);
+  if (newDist > wallLimit) {
+    const angle = Math.atan2(newZ, newX);
+    newX = Math.cos(angle) * wallLimit;
+    newZ = Math.sin(angle) * wallLimit;
   }
 
-  // Apply movement with collision
-  if (!blockedX) state.camera.position.x = newX;
-  if (!blockedZ) state.camera.position.z = newZ;
-  state.camera.position.y = newY;
-
-  // ─── Floor / Ramp collision ──────────────────────────────────
+  // ─── Platform collision ───────────────────────────────────
+  const feetY = newY - PLAYER_HEIGHT;
+  const prevFeetY = state.camera.position.y - PLAYER_HEIGHT;
   state.onGround = false;
-  const px = state.camera.position.x;
-  const pz = state.camera.position.z;
-  const pyNew = state.camera.position.y - PLAYER_HEIGHT;
-  const distFromCenter = Math.sqrt(px * px + pz * pz);
 
-  // Check ramp steps
-  let onRamp = false;
-  if (state.towerGroup) {
-    state.towerGroup.traverse(obj => {
-      if (onRamp) return;
-      if (obj.userData.isRamp) {
-        const wp = obj.position;
-        const dx = px - wp.x;
-        const dz = pz - wp.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 3.5 && pyNew >= wp.y - 2 && pyNew <= wp.y + 1.5) {
-          state.camera.position.y = wp.y + PLAYER_HEIGHT;
-          state.velocity.y = 0;
-          state.onGround = true;
-          onRamp = true;
-        }
-      }
-    });
-  }
+  for (const p of state.roomPlatforms) {
+    // AABB: platform spans [p.x, p.x+p.w] x [p.y, p.y+p.h] x [p.z, p.z+p.d]
+    const inX = newX + PLAYER_RADIUS > p.x && newX - PLAYER_RADIUS < p.x + p.w;
+    const inZ = newZ + PLAYER_RADIUS > p.z && newZ - PLAYER_RADIUS < p.z + p.d;
 
-  if (!onRamp) {
-    for (let floor = state.towerHeight - 1; floor >= 0; floor--) {
-      const floorY = floor * FLOOR_HEIGHT;
-      const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
-
-      if (distFromCenter < radius && pyNew < floorY + 2 && pyNew > floorY - 3) {
-        state.camera.position.y = floorY + PLAYER_HEIGHT;
+    if (inX && inZ) {
+      // Landing on top — feet were above or at platform top, now below
+      if (prevFeetY >= p.top - 0.3 && feetY < p.top) {
+        newY = p.top + PLAYER_HEIGHT;
         state.velocity.y = 0;
         state.onGround = true;
-        break;
+      }
+      // Hitting bottom (head bonk)
+      else if (prevFeetY + PLAYER_HEIGHT <= p.y + 0.3 && newY > p.y) {
+        // Only bonk if moving up
+        if (state.velocity.y > 0) {
+          newY = p.y - 0.01;
+          state.velocity.y = 0;
+        }
+      }
+      // Side collision (push out horizontally)
+      else if (feetY < p.top && feetY + PLAYER_HEIGHT > p.y) {
+        const cx = p.cx;
+        const cz = p.cz;
+        const dx = newX - cx;
+        const dz = newZ - cz;
+        const halfW = p.w / 2 + PLAYER_RADIUS;
+        const halfD = p.d / 2 + PLAYER_RADIUS;
+
+        // Push out on the axis of least penetration
+        const overlapX = halfW - Math.abs(dx);
+        const overlapZ = halfD - Math.abs(dz);
+        if (overlapX < overlapZ) {
+          newX = cx + Math.sign(dx) * halfW;
+        } else {
+          newZ = cz + Math.sign(dz) * halfD;
+        }
       }
     }
   }
 
-  // Ground fallback
-  if (state.camera.position.y < PLAYER_HEIGHT) {
-    state.camera.position.y = PLAYER_HEIGHT;
+  // ─── Ceiling collision ────────────────────────────────────
+  if (newY > state.roomHeight - 1) {
+    newY = state.roomHeight - 1;
     state.velocity.y = 0;
-    state.onGround = true;
   }
+
+  // ─── Respawn on fall ──────────────────────────────────────
+  if (newY < RESPAWN_Y) {
+    newX = 0;
+    newY = PLAYER_HEIGHT + 2;
+    newZ = 0;
+    state.velocity.set(0, 0, 0);
+  }
+
+  state.camera.position.set(newX, newY, newZ);
 
   // Send position to server
   if (network && network.connected) {
@@ -806,39 +605,6 @@ function updateMovement(dt) {
       state.camera.position.z,
       state.euler.y
     );
-  }
-}
-
-// ─── Growth Point Animation & Proximity ──────────────────────────────
-function updateGrowthPoints(time) {
-  state.nearestGrowthPoint = null;
-  let nearestDist = Infinity;
-  const interactEl = document.getElementById('hud-interact');
-
-  state.growthPointMeshes.forEach(mesh => {
-    // Pulse animation
-    const pulse = Math.sin(time * 2.5 + mesh.userData.pulseOffset) * 0.3 + 0.7;
-    mesh.material.opacity = pulse * 0.6;
-    mesh.scale.setScalar(0.8 + pulse * 0.4);
-
-    // Floating animation
-    mesh.position.y += Math.sin(time * 1.5 + mesh.userData.pulseOffset) * 0.002;
-
-    // Check proximity
-    const dx = state.camera.position.x - mesh.position.x;
-    const dy = state.camera.position.y - mesh.position.y;
-    const dz = state.camera.position.z - mesh.position.z;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-    if (dist < PUZZLE_INTERACT_DISTANCE && dist < nearestDist) {
-      nearestDist = dist;
-      state.nearestGrowthPoint = mesh;
-    }
-  });
-
-  // Show/hide interact prompt
-  if (interactEl) {
-    interactEl.style.display = (state.nearestGrowthPoint && !state.solvingPuzzle) ? 'block' : 'none';
   }
 }
 
@@ -862,12 +628,25 @@ function animate() {
   const time = state.clock.getElapsedTime();
 
   updateMovement(dt);
-  updateGrowthPoints(time);
 
-  if (playerManager) playerManager.update(dt);
+  // Portal proximity check
+  if (portalManager && state.locked) {
+    portalManager.update(state.camera.position);
+    const portalInfo = portalManager.getNearestPortalInfo();
+    if (hud) {
+      hud.showPortalHint(portalInfo ? portalInfo.title : null);
+    }
+  }
 
-  // Update HUD floor display periodically
-  if (Math.floor(time * 2) % 2 === 0) updateHUD();
+  // Room animations
+  updateRoomAnimations(state.roomGroup, time);
+
+  if (playerManager) {
+    playerManager.update(dt);
+    if (state.currentArticle) {
+      playerManager.filterByArticle(state.currentArticle);
+    }
+  }
 
   state.asciiMaterial.uniforms.time.value = time;
 
