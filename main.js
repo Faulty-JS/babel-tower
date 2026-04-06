@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
-const CELL_SIZE = 8; // pixel width of each ASCII cell (height is 12, set in shader)
+const CELL_SIZE = 12; // pixel width of each ASCII cell (height is 16, set in shader)
 import { NetworkClient } from './client/network.js';
 import { PlayerManager } from './client/players.js';
 import { ChatUI } from './client/chat.js';
@@ -277,11 +277,11 @@ function spawnGrowthPoints(serverPoints) {
   const points = serverPoints || generateDefaultGrowthPoints();
 
   points.forEach(gp => {
-    const geo = new THREE.SphereGeometry(1.8, 12, 12);
+    const geo = new THREE.SphereGeometry(2.2, 16, 16);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x222222,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.85,
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(gp.x, gp.y, gp.z);
@@ -289,18 +289,18 @@ function spawnGrowthPoints(serverPoints) {
     mesh.userData.growthPointId = gp.id;
     mesh.userData.pulseOffset = Math.random() * Math.PI * 2;
 
-    // Inner core — darker
-    const innerGeo = new THREE.SphereGeometry(1.0, 8, 8);
+    // Inner core — bright white for strong ASCII rendering
+    const innerGeo = new THREE.SphereGeometry(1.2, 8, 8);
     const innerMat = new THREE.MeshBasicMaterial({
-      color: 0x000000,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.9,
+      opacity: 1.0,
     });
     const inner = new THREE.Mesh(innerGeo, innerMat);
     mesh.add(inner);
 
-    // Subtle point light so they show up in ASCII
-    const light = new THREE.PointLight(0xffffff, 0.3, 12);
+    // Strong point light so they glow visibly in the ASCII shader
+    const light = new THREE.PointLight(0xffffff, 1.5, 20);
     mesh.add(light);
 
     state.scene.add(mesh);
@@ -311,12 +311,15 @@ function spawnGrowthPoints(serverPoints) {
 
 function generateDefaultGrowthPoints() {
   const points = [];
-  const topFloors = [state.towerHeight - 1, state.towerHeight];
-  topFloors.forEach(floor => {
-    for (let i = 0; i < 4; i++) {
-      const angle = (i / 4) * Math.PI * 2 + Math.random() * 0.5;
+  // Spread growth points across multiple floors including ground level
+  const floors = [0, 1, Math.max(0, state.towerHeight - 1), state.towerHeight];
+  const uniqueFloors = [...new Set(floors)];
+  uniqueFloors.forEach(floor => {
+    const count = floor <= 1 ? 4 : 3; // more on ground floors for easy access
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.3;
       const radius = TOWER_RADIUS - floor * TAPER_PER_FLOOR;
-      const r = radius * (0.4 + Math.random() * 0.4);
+      const r = radius * (0.3 + Math.random() * 0.4);
       points.push({
         id: `gp_${floor}_${i}`,
         floor,
@@ -439,15 +442,57 @@ function interactWithGrowthPoint() {
     // Request puzzle from server
     network.requestPuzzle(gp.userData.growthPointId);
   } else {
-    // Offline mode: generate a simple local puzzle
-    showPuzzle({
-      type: 'trivia',
-      data: {
-        question: 'What is the tallest structure ever built by humans?',
-        options: ['Burj Khalifa', 'Tokyo Skytree', 'Shanghai Tower', 'CN Tower'],
-        category: 'Architecture',
+    // Offline mode: cycle through new puzzle types for testing
+    const offlinePuzzles = [
+      {
+        type: 'cipher_wall',
+        data: {
+          key: {'◆':'t','●':'h','▲':'e','■':'s','★':'u','⬢':'n'},
+          encoded: ['◆','●','▲',' ','■','★','⬢'],
+          phraseLength: 7,
+        },
       },
-    }, (answer) => {
+      {
+        type: 'inscription',
+        data: {
+          fragments: [
+            {id: 2, text: 'core of a'},
+            {id: 0, text: 'is the collapsed'},
+            {id: 3, text: 'massive supergiant'},
+            {id: 1, text: 'A neutron star'},
+          ],
+          numSlots: 4,
+        },
+      },
+      {
+        type: 'rune_lock',
+        data: {
+          rings: [['◇','◆','●','▲','■'], ['○','★','⬢','△','□']],
+          target: ['◆','★'],
+          keyholeIndex: 0,
+        },
+      },
+      {
+        type: 'seal_breaking',
+        data: {
+          nodes: [
+            {id:0, x:180, y:60, lit:false, label:'B'},
+            {id:1, x:290, y:150, lit:true, label:'A'},
+            {id:2, x:250, y:280, lit:false, label:'B'},
+            {id:3, x:110, y:280, lit:true, label:'E'},
+            {id:4, x:70, y:150, lit:false, label:'L'},
+          ],
+          edges: [{from:0,to:1},{from:1,to:2},{from:2,to:3},{from:3,to:4},{from:4,to:0}],
+          revealText: 'BABEL',
+        },
+      },
+      {
+        type: 'glyph_trace',
+        data: { gridSize: 3, dots: Array.from({length:9},(_,i)=>({row:Math.floor(i/3),col:i%3,id:i})), pathLength: 9 },
+      },
+    ];
+    const puzzle = offlinePuzzles[Math.floor(Math.random() * offlinePuzzles.length)];
+    showPuzzle(puzzle, (answer) => {
       handlePuzzleSubmit(answer);
     }, () => {
       cancelPuzzle();
