@@ -3,127 +3,85 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BABEL</title>
+  <title>BRING IT</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&display=swap');
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { overflow: hidden; background: #f5f3f0; cursor: crosshair; font-family: monospace; }
-    canvas { display: block; }
+    body {
+      overflow: hidden; background: #0a0a12;
+      font-family: 'Inter', sans-serif; color: #fff;
+      user-select: none; -webkit-user-select: none;
+    }
+    canvas#game { display: block; width: 100vw; height: 100vh; }
 
-    /* ─── Blocker (click to enter) ─────────────────────────────── */
-    #blocker {
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(245,243,240,0.95); display: flex; align-items: center;
-      justify-content: center; z-index: 100; cursor: pointer;
-      flex-direction: column;
+    /* ─── Lobby Overlay ──────────────────────────────── */
+    #lobby {
+      position: fixed; inset: 0; z-index: 100;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(10,10,18,0.95);
     }
-    #blocker .title {
-      font-family: monospace; font-size: 64px; color: #111;
-      letter-spacing: 20px; margin-bottom: 10px;
+    #lobby .title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 96px; letter-spacing: 8px;
+      background: linear-gradient(135deg, #FF1493, #FF6B35, #FFE600);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
-    #blocker .subtitle {
-      font-family: monospace; font-size: 12px; color: #888;
-      letter-spacing: 4px; margin-bottom: 30px;
+    #lobby .subtitle {
+      font-size: 14px; color: #666; letter-spacing: 3px;
+      text-transform: uppercase; margin-bottom: 40px;
     }
-    #blocker .prompt {
-      color: #666; font-family: monospace; font-size: 14px;
-      text-align: center; line-height: 2; animation: blink 2s infinite;
+    #lobby .player-count {
+      font-size: 24px; color: #aaa; margin-bottom: 20px;
     }
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.2; }
+    #lobby .player-count span { color: #FF1493; font-weight: 900; }
+    #lobby .start-btn {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 36px; letter-spacing: 4px;
+      padding: 12px 48px; border: 2px solid #FF1493;
+      background: transparent; color: #FF1493;
+      cursor: pointer; transition: all 0.2s;
     }
-
-    /* ─── HUD ──────────────────────────────────────────────────── */
-    #hud {
-      position: fixed; top: 0; left: 0; right: 0;
-      pointer-events: none; z-index: 50;
+    #lobby .start-btn:hover {
+      background: #FF1493; color: #0a0a12;
     }
-    #hud-article {
-      position: fixed; top: 12px; left: 16px;
-      color: #222; font-size: 16px; font-weight: bold; opacity: 0.8;
-      max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    #lobby .start-btn:disabled {
+      border-color: #333; color: #333; cursor: not-allowed;
     }
-    #hud-target {
-      position: fixed; top: 36px; left: 16px;
-      color: #c0392b; font-size: 14px; font-weight: bold; opacity: 0.9;
+    #lobby .start-btn:disabled:hover { background: transparent; color: #333; }
+    #lobby .instructions {
+      margin-top: 30px; color: #555; font-size: 12px;
+      text-align: center; line-height: 2;
     }
-    #hud-breadcrumbs {
-      position: fixed; top: 56px; left: 16px;
-      color: #888; font-size: 11px; opacity: 0.5;
-      max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    #hud-players {
-      position: fixed; top: 12px; right: 16px;
-      color: #222; font-size: 14px; opacity: 0.7;
-    }
-    #hud-portal-hint {
-      position: fixed; bottom: 80px; left: 50%;
-      transform: translateX(-50%);
-      color: #111; font-size: 16px;
-      background: rgba(255,255,255,0.85); padding: 8px 20px;
-      border: 1px solid #999;
-      animation: pulse-interact 1.5s infinite;
-    }
-    @keyframes pulse-interact {
-      0%, 100% { opacity: 0.6; border-color: #aaa; }
-      50% { opacity: 1; border-color: #333; }
-    }
-    #hud-controls {
-      position: fixed; bottom: 12px; left: 50%;
-      transform: translateX(-50%);
-      color: #999; font-size: 11px; opacity: 0.6;
-      white-space: nowrap;
+    #lobby .instructions kbd {
+      background: #222; padding: 2px 8px; border-radius: 3px;
+      border: 1px solid #444; font-family: monospace;
     }
 
-    /* ─── Chat ─────────────────────────────────────────────────── */
-    #chat-container {
-      position: fixed; bottom: 40px; left: 16px;
-      width: 320px; z-index: 60; pointer-events: none;
-    }
-    #chat-messages {
-      max-height: 200px; overflow: hidden;
-    }
-    .chat-message {
-      color: #666; font-size: 12px; padding: 3px 0;
-      opacity: 0.8; transition: opacity 1s;
-    }
-    .chat-message.fading { opacity: 0; }
-    #chat-input-row {
-      display: none; pointer-events: all; margin-top: 4px;
-    }
-    #chat-input {
-      width: 100%; background: rgba(255,255,255,0.95);
-      border: 1px solid #aaa; color: #111;
-      font-family: monospace; font-size: 13px;
-      padding: 6px 10px; outline: none;
-    }
-    #chat-input:focus { border-color: #333; }
-    #chat-input::placeholder { color: #bbb; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <div id="blocker">
-    <div class="title">BABEL</div>
-    <div class="subtitle">THE LIBRARY OF INFINITE ROOMS</div>
-    <div class="prompt">click to enter the library</div>
+  <canvas id="game"></canvas>
+
+  <div id="lobby">
+    <div class="title">BRING IT</div>
+    <div class="subtitle">rhythm &bull; party &bull; chaos</div>
+    <div class="player-count">Players: <span id="lobby-count">0</span></div>
+    <button class="start-btn" id="start-btn" disabled>WAITING FOR PLAYERS</button>
+    <div class="instructions">
+      <kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd> or
+      <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> to move on the beat<br>
+      Caller sets the pattern &bull; Responders copy it &bull; Miss it and you're out
+    </div>
   </div>
 
   <script>
-    // Leave empty for same-origin (dev), set to Railway URL for production deploy
-    // window.BABEL_SERVER_URL = 'wss://babel-tower-production.up.railway.app';
-    window.BABEL_SERVER_URL = '';
+    window.GAME_SERVER_URL = '';
   </script>
-
-  <!-- Colyseus client -->
   <script src="https://unpkg.com/colyseus.js@0.15.24/dist/colyseus.js"></script>
-
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.170.0/three.module.min.js"
-    }
-  }
-  </script>
   <script type="module" src="main.js"></script>
 </body>
 </html>

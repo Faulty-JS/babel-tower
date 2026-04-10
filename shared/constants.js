@@ -1,53 +1,67 @@
 /**
- * Shared constants used by both client and server.
+ * Shared constants for the rhythm party game.
  */
 
-// ─── Room Geometry ──────────────────────────────────────────────────
-export const BASE_ROOM_RADIUS = 60;       // Default room radius (big rooms)
-export const ROOM_HEIGHT = 40;            // Wall height (tall for platforming)
-export const ROOM_SIDES = 6;             // Hexagonal rooms (Borges-style)
+// ─── Server ──────────────────────────────────────────────
+export const SERVER_PORT = 3456;
+export const MAX_PLAYERS = 99;
+export const TICK_RATE = 20; // Hz
 
-// ─── Player ─────────────────────────────────────────────────────────
-export const PLAYER_HEIGHT = 3;
-export const MOVE_SPEED = 22;
-export const JUMP_FORCE = 22;
-export const GRAVITY = -65;
-export const MOUSE_SENSITIVITY = 0.002;
-export const PLAYER_RADIUS = 1.0;
-export const PLAYER_COLORS = [
-  0xff6b6b, 0x4ecdc4, 0x45b7d1, 0xf9ca24,
-  0x6c5ce7, 0xa8e6cf, 0xfd9644, 0xee5a24,
-  0x7bed9f, 0xe056fd, 0x0abde3, 0xfeca57,
-];
+// ─── Rhythm ──────────────────────────────────────────────
+export const STARTING_BPM = 100;
+export const BPM_INCREMENT = 8;      // per round
+export const MAX_BPM = 200;
+export const BEATS_PER_BAR = 4;      // 4/4 time
+export const SUBDIVISIONS = 8;       // 8th notes per bar (2 per beat)
+export const MIN_PLAYERS_TO_START = 2;
+export const COUNTDOWN_SECONDS = 3;
+export const RESULTS_DURATION_MS = 3000;
 
-// ─── Portals ────────────────────────────────────────────────────────
-export const PORTAL_WIDTH = 4;
-export const PORTAL_HEIGHT = 6;
-export const PORTAL_TRIGGER_DISTANCE = 4;  // Walk into portal to enter (3D distance)
-export const MAX_PORTALS_PER_ROOM = 10;
-export const MIN_PORTALS_PER_ROOM = 4;
-
-// ─── Wikipedia ──────────────────────────────────────────────────────
-export const WIKI_LINKS_PER_ROOM = 8;     // Target number of links shown as portals
-export const ARTICLE_CACHE_TTL = 3600000; // 1 hour in ms
-export const MAX_CACHE_SIZE = 10000;
-
-// ─── Room Categories (keyword-to-environment mapping) ───────────────
-export const ROOM_CATEGORIES = {
-  nature:     { keywords: ['ocean', 'mountain', 'forest', 'river', 'lake', 'tree', 'animal', 'plant', 'bird', 'fish', 'flower', 'garden', 'island', 'desert', 'jungle', 'sea', 'water', 'earth', 'rain', 'wind'], color: 0x4a7c59, ambientColor: 0x88aa88 },
-  science:    { keywords: ['atom', 'star', 'cell', 'quantum', 'energy', 'electron', 'molecule', 'physics', 'chemical', 'biology', 'dna', 'gene', 'theory', 'experiment', 'particle', 'wavelength', 'formula', 'equation'], color: 0x4a6a8c, ambientColor: 0x8888cc },
-  history:    { keywords: ['war', 'king', 'empire', 'ancient', 'dynasty', 'battle', 'century', 'revolution', 'medieval', 'colonial', 'roman', 'emperor', 'kingdom', 'civilization', 'conquest'], color: 0x8c7a5c, ambientColor: 0xaa9977 },
-  art:        { keywords: ['music', 'painting', 'dance', 'film', 'theater', 'novel', 'poem', 'sculpture', 'artist', 'composer', 'symphony', 'gallery', 'canvas', 'opera', 'literary'], color: 0x8c5c6a, ambientColor: 0xcc8899 },
-  technology: { keywords: ['computer', 'engine', 'digital', 'machine', 'software', 'internet', 'algorithm', 'robot', 'program', 'network', 'data', 'code', 'system', 'device', 'electronic'], color: 0x5c6a8c, ambientColor: 0x7799bb },
-  geography:  { keywords: ['city', 'country', 'island', 'capital', 'population', 'continent', 'region', 'province', 'territory', 'border', 'coast', 'state', 'nation', 'republic', 'district'], color: 0x6a8c5c, ambientColor: 0x99aa77 },
-  default:    { keywords: [], color: 0x7a7a6a, ambientColor: 0x999988 },
+// ─── Moves ───────────────────────────────────────────────
+// 0 = empty, 1-4 = directional
+export const MOVE = {
+  NONE: 0,
+  UP: 1,
+  DOWN: 2,
+  LEFT: 3,
+  RIGHT: 4,
 };
 
-// ─── Chat / Babel ───────────────────────────────────────────────────
-export const CHAT_BUBBLE_DURATION_MS = 5000;
-export const MAX_CHAT_LENGTH = 140;
+export const MOVE_NAMES = ['', 'UP', 'DOWN', 'LEFT', 'RIGHT'];
+export const MOVE_KEYS = {
+  ArrowUp: MOVE.UP,    w: MOVE.UP,    W: MOVE.UP,
+  ArrowDown: MOVE.DOWN, s: MOVE.DOWN,  S: MOVE.DOWN,
+  ArrowLeft: MOVE.LEFT, a: MOVE.LEFT,  A: MOVE.LEFT,
+  ArrowRight: MOVE.RIGHT, d: MOVE.RIGHT, D: MOVE.RIGHT,
+};
 
-// ─── Network ────────────────────────────────────────────────────────
-export const SERVER_PORT = 3456;
-export const TICK_RATE = 20;
-export const MAX_PLAYERS = 50;
+// ─── Game Phases ─────────────────────────────────────────
+export const PHASE = {
+  LOBBY: 'lobby',
+  COUNTDOWN: 'countdown',
+  CALLING_BAR1: 'calling_bar1',
+  CALLING_BAR2: 'calling_bar2',
+  RESPONDING: 'responding',
+  JUDGING: 'judging',
+  RESULTS: 'results',
+  GAME_OVER: 'game_over',
+};
+
+// ─── Colors (neon palette) ───────────────────────────────
+export const NEON_COLORS = [
+  '#FF1493', // deep pink
+  '#00FF87', // spring green
+  '#00D4FF', // cyan
+  '#FFE600', // yellow
+  '#FF6B35', // orange
+  '#B24BF3', // purple
+  '#FF3366', // hot pink
+  '#39FF14', // neon green
+  '#FF5F1F', // neon orange
+  '#00FFFF', // aqua
+  '#FF00FF', // magenta
+  '#7FFF00', // chartreuse
+  '#FF4500', // red-orange
+  '#1E90FF', // dodger blue
+  '#FFD700', // gold
+];

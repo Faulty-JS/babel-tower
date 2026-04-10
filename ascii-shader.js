@@ -114,43 +114,40 @@ export const AsciiShader = {
       outline *= mix(0.6, 1.0, smoothstep(0.5, 0.0, l));
 
       // ── Tonal mapping ─────────────────────────────
+      // Aggressive brightness lift so dark rooms still read
+      float t = clamp(l * 2.0 + 0.08, 0.0, 1.0);
       // S-curve for print-like contrast
-      float t = clamp(l * 1.2 + 0.05, 0.0, 1.0);
       t = t * t * (3.0 - 2.0 * t);
 
-      // Map through the sepia palette
-      vec3 color = mix(SHADOW, MIDTONE, smoothstep(0.0, 0.45, t));
-      color = mix(color, PAPER, smoothstep(0.35, 0.9, t));
-
-      // Hint of scene color for room variety (~15%)
-      vec3 chroma = scene / (l + 0.01) - 1.0;
-      color += chroma * 0.06 * presence;
+      // Map through the sepia palette — pure, no scene color
+      vec3 color = mix(SHADOW, MIDTONE, smoothstep(0.0, 0.4, t));
+      color = mix(color, PAPER, smoothstep(0.3, 0.85, t));
 
       // ── Hatching (shadow regions only) ────────────
-      float darkness = smoothstep(0.45, 0.0, t);
+      float darkness = smoothstep(0.5, 0.0, t);
 
       if (darkness > 0.01) {
-        float w = vnoise(pix * 0.05) * 3.5;
+        float w = vnoise(pix * 0.05) * 4.0;
 
         // Primary diagonal strokes
-        float spacing = mix(7.0, 4.0, darkness);
+        float spacing = mix(6.0, 3.5, darkness);
         float strokeLine = mod(pix.x - pix.y * 0.8 + w, spacing);
-        float strokeW = mix(0.3, 1.1, darkness);
+        float strokeW = mix(0.4, 1.3, darkness);
         float stroke = 1.0 - smoothstep(0.0, strokeW, strokeLine);
 
         // Break strokes for hand-drawn feel
-        stroke *= step(0.22, vnoise(pix * 0.02 + 300.0));
+        stroke *= step(0.18, vnoise(pix * 0.02 + 300.0));
 
-        color = mix(color, INK, stroke * darkness * 0.45 * presence);
+        color = mix(color, INK, stroke * darkness * 0.55 * presence);
 
-        // Cross-strokes in deepest shadows only
-        if (darkness > 0.55) {
-          float crossDark = smoothstep(0.55, 1.0, darkness);
+        // Cross-strokes in deeper shadows
+        if (darkness > 0.45) {
+          float crossDark = smoothstep(0.45, 1.0, darkness);
           float w2 = vnoise(pix * 0.04 + 80.0) * 3.0;
-          float crossLine = mod(pix.x + pix.y * 0.8 + w2, spacing * 1.2);
+          float crossLine = mod(pix.x + pix.y * 0.8 + w2, spacing * 1.1);
           float crossStroke = 1.0 - smoothstep(0.0, strokeW * 0.8, crossLine);
-          crossStroke *= step(0.28, vnoise(pix * 0.025 + 500.0));
-          color = mix(color, INK, crossStroke * crossDark * 0.35 * presence);
+          crossStroke *= step(0.25, vnoise(pix * 0.025 + 500.0));
+          color = mix(color, INK, crossStroke * crossDark * 0.4 * presence);
         }
       }
 

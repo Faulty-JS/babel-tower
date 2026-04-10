@@ -141,27 +141,36 @@ export async function getArticleData(title) {
 function selectPortalLinks(allLinks, count) {
   if (allLinks.length <= count) return allLinks;
 
-  // Prefer links from the first half of the article (more relevant)
-  const preferredCount = Math.min(Math.floor(allLinks.length * 0.5), allLinks.length);
-  const preferred = allLinks.slice(0, preferredCount);
-  const rest = allLinks.slice(preferredCount);
+  // Split: first half of article links are more relevant (better hubs)
+  const midpoint = Math.floor(allLinks.length * 0.5);
+  const goodLinks = shuffleArray([...allLinks.slice(0, midpoint)]);
+  const weakLinks = shuffleArray([...allLinks.slice(midpoint)]);
 
+  // Build the result array: WEAK links first (ground portals), GOOD links last (high portals)
+  // This way the easy-to-reach portals are less useful, and skilled platforming
+  // is rewarded with better navigation options.
   const selected = [];
   const used = new Set();
 
-  // Pick most from preferred
-  const fromPreferred = Math.min(Math.ceil(count * 0.7), preferred.length);
-  const shuffledPref = shuffleArray([...preferred]);
-  for (let i = 0; i < fromPreferred && selected.length < count; i++) {
-    selected.push(shuffledPref[i]);
-    used.add(shuffledPref[i]);
+  // Fill first slots with weak links (ground-level portals)
+  const weakCount = Math.floor(count * 0.4);
+  for (let i = 0; i < weakLinks.length && selected.length < weakCount; i++) {
+    selected.push(weakLinks[i]);
+    used.add(weakLinks[i]);
   }
 
-  // Fill rest from remaining
-  const shuffledRest = shuffleArray([...rest]);
-  for (let i = 0; i < shuffledRest.length && selected.length < count; i++) {
-    if (!used.has(shuffledRest[i])) {
-      selected.push(shuffledRest[i]);
+  // Fill remaining slots with good links (high portals — reward for platforming)
+  for (let i = 0; i < goodLinks.length && selected.length < count; i++) {
+    if (!used.has(goodLinks[i])) {
+      selected.push(goodLinks[i]);
+      used.add(goodLinks[i]);
+    }
+  }
+
+  // If still not enough, fill from weak
+  for (let i = 0; i < weakLinks.length && selected.length < count; i++) {
+    if (!used.has(weakLinks[i])) {
+      selected.push(weakLinks[i]);
     }
   }
 

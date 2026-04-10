@@ -1,665 +1,720 @@
-import * as THREE from 'three';
-import { AsciiShader, createCharAtlas, ATLAS_INFO } from './ascii-shader.js';
-const CELL_SIZE = 10; // cell width; height is 14 (set in shader)
-import { NetworkClient } from './client/network.js';
-import { PlayerManager } from './client/players.js';
-import { ChatUI } from './client/chat.js';
-import { HUD } from './client/hud.js';
-import { PortalManager } from './client/portal-ui.js';
-import { buildRoom, updateRoomAnimations } from './client/room-renderer.js';
-import { generateBabelText } from './shared/babel-text.js';
+/**
+ * BRING IT — Rhythm Party Game Client
+ *
+ * Canvas 2D renderer, beat system, input handling, Colyseus networking.
+ * First mode: Workout Class (P90X style)
+ */
+
 import {
-  PLAYER_HEIGHT, MOVE_SPEED, JUMP_FORCE, GRAVITY,
-  MOUSE_SENSITIVITY, PLAYER_RADIUS, BASE_ROOM_RADIUS,
-  ROOM_HEIGHT, ROOM_CATEGORIES,
+  MOVE, MOVE_KEYS, MOVE_NAMES, PHASE, SUBDIVISIONS,
+  BEATS_PER_BAR, NEON_COLORS, STARTING_BPM,
 } from './shared/constants.js';
 
-// ─── Platformer Physics Tuning ──────────────────────────────────────
-const COYOTE_TIME = 0.1;           // seconds after leaving edge you can still jump
-const JUMP_BUFFER_TIME = 0.1;      // seconds before landing that jump input is remembered
-const JUMP_CUT_MULTIPLIER = 0.35;  // velocity multiplier when releasing jump early
-const WALL_SLIDE_SPEED = -6;       // max downward speed when wall sliding
-const WALL_JUMP_FORCE_Y = JUMP_FORCE * 1.0;
-const WALL_JUMP_FORCE_XZ = MOVE_SPEED * 0.8;
-const RESPAWN_Y = -20;             // fall below this = respawn
-const GROUND_ACCEL = 50;           // how fast you reach full speed on ground (higher = snappier)
-const GROUND_DECEL = 40;           // how fast you stop on ground (higher = less slippery)
-const AIR_ACCEL = 8;               // air acceleration (lower = more committed jumps)
-const AIR_DECEL = 3;               // air deceleration (low = momentum-preserving)
+// ─── State ──────────────────────────────────────────────────────────
 
-// ─── State ───────────────────────────────────────────────────────────
 const state = {
-  camera: null,
-  scene: null,
-  renderer: null,
-  clock: new THREE.Clock(),
-  movement: { forward: false, backward: false, left: false, right: false, jump: false },
-  euler: new THREE.Euler(0, 0, 0, 'YXZ'),
-  velocity: new THREE.Vector3(),
-  locked: false,
-  asciiEnabled: true,
-  onGround: false,
-  // Platformer physics
-  coyoteTimer: 0,          // time since last grounded (allows late jumps)
-  jumpBufferTimer: 0,      // time since jump pressed (allows early jumps)
-  jumpHeld: false,          // is jump key still held (variable jump height)
-  wallSlideDir: 0,          // -1 or 1 if wall sliding, 0 if not
-  lastWallNormalX: 0,
-  lastWallNormalZ: 0,
-  // Post-processing
-  renderTarget: null,
-  asciiMaterial: null,
-  asciiScene: null,
-  asciiCamera: null,
-  // Room state
-  roomGroup: null,
-  roomPortals: [],
-  roomPlatforms: [],
-  roomRadius: BASE_ROOM_RADIUS,
-  roomHeight: ROOM_HEIGHT,
-  currentArticle: null,
+  room: null,
+  myId: null,
+  phase: PHASE.LOBBY,
+  bpm: STARTING_BPM,
+  round: 0,
+  callerId: '',
+  countdown: 0,
+  alivePlayers: 0,
+  totalPlayers: 0,
+
+  // Timing
+  barStartTime: 0,
+  barDurationMs: 2400,
+  barProgress: 0,       // 0-1 within current bar
+
+  // Pattern data
+  bar1Pattern: new Array(SUBDIVISIONS).fill(0),
+  bar2Pattern: new Array(SUBDIVISIONS).fill(0),
+  lockedPattern: new Array(SUBDIVISIONS).fill(0),
+  myInputs: new Array(SUBDIVISIONS).fill(0),
+  lastInputSlot: -1,
+
+  // Players
+  players: new Map(),   // sessionId → { color, role, alive, score, currentMove }
+
+  // UI
+  message: '',
+  messageTimer: 0,
+  resultMessage: '',
+  callerFailed: false,
+  gameOverWinner: null,
+
+  // Beat pulse
+  beatPulse: 0,
 };
 
-// ─── Modules ─────────────────────────────────────────────────────────
-let network = null;
-let playerManager = null;
-let chatUI = null;
-let hud = null;
-let portalManager = null;
+// ─── Canvas Setup ───────────────────────────────────────────────────
 
-// ─── Init ────────────────────────────────────────────────────────────
-function init() {
-  // Renderer
-  state.renderer = new THREE.WebGLRenderer({ antialias: false });
-  state.renderer.setSize(window.innerWidth, window.innerHeight);
-  state.renderer.setPixelRatio(1);
-  state.renderer.setClearColor(0x000000);
-  document.body.appendChild(state.renderer.domElement);
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
 
-  // Scene
-  state.scene = new THREE.Scene();
-  state.scene.background = new THREE.Color(0x000000);
-  state.scene.fog = new THREE.FogExp2(0x000000, 0.008);
-
-  // Camera
-  state.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
-  state.camera.position.set(0, PLAYER_HEIGHT, 0);
-
-  // Post-processing
-  setupAsciiPostProcessing();
-
-  // Lighting (will be adjusted per room)
-  setupLighting();
-
-  // Modules
-  playerManager = new PlayerManager(state.scene);
-  hud = new HUD();
-  portalManager = new PortalManager();
-
-  portalManager.onEnterPortal = (targetArticle) => {
-    loadArticle(targetArticle);
-  };
-
-  // Controls
-  setupControls();
-
-  // Resize
-  window.addEventListener('resize', onResize);
-
-  // Connect to server (or run offline)
-  connectToServer();
-
-  // Go
-  animate();
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
 }
+window.addEventListener('resize', resize);
+resize();
 
-// ─── ASCII Post-Processing ───────────────────────────────────────────
-function setupAsciiPostProcessing() {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
+// ─── Network ────────────────────────────────────────────────────────
 
-  state.renderTarget = new THREE.WebGLRenderTarget(w, h, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat,
-  });
+async function connect() {
+  const host = window.GAME_SERVER_URL || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
+  const client = new Colyseus.Client(host);
 
-  const charAtlas = createCharAtlas(THREE);
-
-  state.asciiMaterial = new THREE.ShaderMaterial({
-    uniforms: {
-      tDiffuse: { value: state.renderTarget.texture },
-      tAtlas: { value: charAtlas },
-      resolution: { value: new THREE.Vector2(w, h) },
-      cellSize: { value: CELL_SIZE },
-      time: { value: 0.0 },
-      gridSize: { value: ATLAS_INFO.gridSize },
-      totalChars: { value: ATLAS_INFO.totalChars },
-    },
-    vertexShader: AsciiShader.vertexShader,
-    fragmentShader: AsciiShader.fragmentShader,
-    depthTest: false,
-    depthWrite: false,
-  });
-
-  state.asciiCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  state.asciiScene = new THREE.Scene();
-  const quad = new THREE.PlaneGeometry(2, 2);
-  state.asciiScene.add(new THREE.Mesh(quad, state.asciiMaterial));
-}
-
-// ─── Lighting ────────────────────────────────────────────────────────
-function setupLighting() {
-  const ambient = new THREE.AmbientLight(0xffffff, 1.0);
-  state.scene.add(ambient);
-
-  const dir = new THREE.DirectionalLight(0xffffff, 1.2);
-  dir.position.set(10, 30, 10);
-  state.scene.add(dir);
-
-  const fill = new THREE.DirectionalLight(0xeeeeff, 0.4);
-  fill.position.set(-10, 20, -10);
-  state.scene.add(fill);
-
-  // Central room light
-  const center = new THREE.PointLight(0xffeedd, 0.8, ROOM_HEIGHT * 3);
-  center.position.set(0, ROOM_HEIGHT * 0.7, 0);
-  state.scene.add(center);
-}
-
-// ─── Room Loading ────────────────────────────────────────────────────
-
-function loadRoom(articleData) {
-  // Remove old room
-  if (state.roomGroup) {
-    state.scene.remove(state.roomGroup);
-    state.roomGroup = null;
-  }
-
-  // Build new room
-  const { group, portals, platforms, radius, height } = buildRoom(articleData);
-  state.roomGroup = group;
-  state.roomPortals = portals;
-  state.roomPlatforms = platforms || [];
-  state.roomRadius = radius;
-  state.roomHeight = height || ROOM_HEIGHT;
-  state.currentArticle = articleData.title;
-  state.scene.add(group);
-
-  // Update portal manager
-  portalManager.setPortals(portals);
-  portalManager.transitionComplete();
-
-  // Update HUD
-  hud.setArticle(articleData.title);
-
-  // Reset player position to room center
-  state.camera.position.set(0, PLAYER_HEIGHT, 0);
-  state.velocity.set(0, 0, 0);
-
-  console.log(`[Game] Loaded room: ${articleData.title} (${portals.length} portals)`);
-}
-
-function loadArticle(title) {
-  if (network && network.connected) {
-    network.enterPortal(title);
-  } else {
-    // Offline: use hardcoded fallback
-    loadOfflineArticle(title);
+  try {
+    state.room = await client.joinOrCreate('party');
+    state.myId = state.room.sessionId;
+    console.log('[Net] Joined as', state.myId);
+    setupRoomListeners();
+  } catch (e) {
+    console.error('[Net] Failed to connect:', e);
+    setTimeout(connect, 2000);
   }
 }
 
-// ─── Offline Mode (hardcoded articles for testing) ───────────────────
+function setupRoomListeners() {
+  const room = state.room;
 
-const OFFLINE_ARTICLES = {
-  'Library of Babel': {
-    title: 'Library of Babel',
-    extract: 'The Library of Babel is a short story by Argentine author and librarian Jorge Luis Borges, conceiving of a universe in the form of a vast library containing all possible 410-page books of a certain format and character set.',
-    links: ['Jorge Luis Borges', 'Universe', 'Book', 'Infinity', 'Mathematics', 'Philosophy'],
-    category: 'art',
-    linkCount: 42,
-  },
-  'Jorge Luis Borges': {
-    title: 'Jorge Luis Borges',
-    extract: 'Jorge Francisco Isidoro Luis Borges Acevedo was an Argentine short-story writer, essayist, poet and translator, and a key figure in Spanish-language and international literature.',
-    links: ['Argentina', 'Short story', 'Library of Babel', 'Poetry', 'Literature', 'Buenos Aires'],
-    category: 'art',
-    linkCount: 35,
-  },
-  'Universe': {
-    title: 'Universe',
-    extract: 'The universe is all of space and time and their contents, including planets, stars, galaxies, and all other forms of matter and energy.',
-    links: ['Space', 'Time', 'Galaxy', 'Star', 'Planet', 'Big Bang', 'Dark matter', 'Library of Babel'],
-    category: 'science',
-    linkCount: 60,
-  },
-  'Philosophy': {
-    title: 'Philosophy',
-    extract: 'Philosophy is the systematized study of general and fundamental questions, such as those about existence, reason, knowledge, values, mind, and language.',
-    links: ['Existence', 'Knowledge', 'Ethics', 'Logic', 'Metaphysics', 'Library of Babel'],
-    category: 'default',
-    linkCount: 50,
-  },
-};
+  // State sync
+  room.state.listen('phase', (val) => { state.phase = val; });
+  room.state.listen('bpm', (val) => { state.bpm = val; });
+  room.state.listen('round', (val) => { state.round = val; });
+  room.state.listen('callerId', (val) => { state.callerId = val; });
+  room.state.listen('countdown', (val) => { state.countdown = val; });
+  room.state.listen('alivePlayers', (val) => { state.alivePlayers = val; });
+  room.state.listen('totalPlayers', (val) => { state.totalPlayers = val; });
+  room.state.listen('barDurationMs', (val) => { state.barDurationMs = val; });
 
-function loadOfflineArticle(title) {
-  const data = OFFLINE_ARTICLES[title];
-  if (data) {
-    loadRoom(data);
-  } else {
-    // Generate a generic room for unknown articles
-    loadRoom({
-      title,
-      extract: `This is the room for "${title}". In the full game, this room would be generated from the Wikipedia article's content.`,
-      links: Object.keys(OFFLINE_ARTICLES),
-      category: 'default',
-      linkCount: 6,
+  // Player sync
+  room.state.players.onAdd((player, sessionId) => {
+    state.players.set(sessionId, {
+      color: player.color,
+      role: player.role,
+      alive: player.alive,
+      score: player.score,
+      currentMove: player.currentMove,
     });
-  }
-}
-
-// ─── Controls ────────────────────────────────────────────────────────
-function setupControls() {
-  const blocker = document.getElementById('blocker');
-  let hasEnteredOnce = false;
-
-  blocker.addEventListener('click', () => {
-    document.body.requestPointerLock();
+    player.listen('role', (v) => { const p = state.players.get(sessionId); if (p) p.role = v; });
+    player.listen('alive', (v) => { const p = state.players.get(sessionId); if (p) p.alive = v; });
+    player.listen('score', (v) => { const p = state.players.get(sessionId); if (p) p.score = v; });
+    player.listen('currentMove', (v) => { const p = state.players.get(sessionId); if (p) p.currentMove = v; });
+    player.listen('color', (v) => { const p = state.players.get(sessionId); if (p) p.color = v; });
+    updateLobbyCount();
+  });
+  room.state.players.onRemove((player, sessionId) => {
+    state.players.delete(sessionId);
+    updateLobbyCount();
   });
 
-  document.addEventListener('click', (e) => {
-    if (hasEnteredOnce && !state.locked &&
-        !(chatUI && chatUI.visible) && e.target.tagName === 'CANVAS') {
-      document.body.requestPointerLock();
+  // Messages
+  room.onMessage('phaseChange', (data) => {
+    state.callerFailed = false;
+    state.gameOverWinner = null;
+    if (data.barDurationMs) {
+      state.barDurationMs = data.barDurationMs;
+      state.barStartTime = Date.now();
     }
-  });
+    if (data.bar1Pattern) state.bar1Pattern = [...data.bar1Pattern];
+    if (data.pattern) state.lockedPattern = [...data.pattern];
 
-  document.addEventListener('pointerlockchange', () => {
-    state.locked = document.pointerLockElement === document.body;
-
-    if (state.locked && !hasEnteredOnce) {
-      hasEnteredOnce = true;
+    // Reset my inputs when my turn starts
+    if (data.phase === PHASE.CALLING_BAR1 || data.phase === PHASE.CALLING_BAR2) {
+      if (state.myId === state.callerId) {
+        state.myInputs.fill(0);
+        state.lastInputSlot = -1;
+      }
     }
-
-    if (chatUI && chatUI.visible) {
-      blocker.style.display = 'none';
-    } else if (!hasEnteredOnce) {
-      blocker.style.display = state.locked ? 'none' : 'flex';
+    if (data.phase === PHASE.RESPONDING) {
+      state.myInputs.fill(0);
+      state.lastInputSlot = -1;
+    }
+    if (data.phase === PHASE.LOBBY) {
+      showLobby();
     } else {
-      blocker.style.display = 'none';
-      if (!state.locked) {
-        showResumeHint();
+      hideLobby();
+    }
+  });
+
+  room.onMessage('canStart', (data) => {
+    updateLobbyCount();
+  });
+
+  room.onMessage('inputEvent', (data) => {
+    // Update the displayed pattern bars
+    if (data.phase === PHASE.CALLING_BAR1) {
+      state.bar1Pattern[data.slot] = data.move;
+    } else if (data.phase === PHASE.CALLING_BAR2) {
+      state.bar2Pattern[data.slot] = data.move;
+    }
+  });
+
+  room.onMessage('patternLocked', (data) => {
+    state.lockedPattern = [...data.pattern];
+    flashMessage('PATTERN LOCKED!', '#00FF87');
+  });
+
+  room.onMessage('callerFailed', (data) => {
+    state.callerFailed = true;
+    flashMessage(data.reason, '#FF3366');
+    state.bar1Pattern.fill(0);
+    state.bar2Pattern.fill(0);
+  });
+
+  room.onMessage('roundResults', (data) => {
+    const myResult = data.results.find(r => r.sessionId === state.myId);
+    if (myResult) {
+      if (myResult.survived) {
+        flashMessage('SURVIVED!', '#00FF87');
       } else {
-        hideResumeHint();
+        flashMessage('ELIMINATED!', '#FF3366');
       }
     }
+    state.resultMessage = `${data.alivePlayers} players remaining`;
   });
 
-  document.addEventListener('mousemove', (e) => {
-    if (!state.locked) return;
-    state.euler.setFromQuaternion(state.camera.quaternion);
-    state.euler.y -= e.movementX * MOUSE_SENSITIVITY;
-    state.euler.x -= e.movementY * MOUSE_SENSITIVITY;
-    state.euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, state.euler.x));
-    state.camera.quaternion.setFromEuler(state.euler);
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (chatUI && chatUI.visible) return;
-
-    switch (e.code) {
-      case 'KeyW': case 'ArrowUp':    state.movement.forward = true; break;
-      case 'KeyS': case 'ArrowDown':  state.movement.backward = true; break;
-      case 'KeyA': case 'ArrowLeft':  state.movement.left = true; break;
-      case 'KeyD': case 'ArrowRight': state.movement.right = true; break;
-      case 'Space':
-        state.movement.jump = true;
-        state.jumpHeld = true;
-        state.jumpBufferTimer = JUMP_BUFFER_TIME;
-        e.preventDefault();
-        break;
-      case 'Backquote':
-        state.asciiEnabled = !state.asciiEnabled;
-        break;
-      case 'KeyT':
-        if (chatUI && !chatUI.visible) {
-          if (document.pointerLockElement) document.exitPointerLock();
-          chatUI.showInput();
-        }
-        break;
-    }
-  });
-
-  document.addEventListener('keyup', (e) => {
-    switch (e.code) {
-      case 'KeyW': case 'ArrowUp':    state.movement.forward = false; break;
-      case 'KeyS': case 'ArrowDown':  state.movement.backward = false; break;
-      case 'KeyA': case 'ArrowLeft':  state.movement.left = false; break;
-      case 'KeyD': case 'ArrowRight': state.movement.right = false; break;
-      case 'Space':
-        state.movement.jump = false;
-        state.jumpHeld = false;
-        break;
+  room.onMessage('gameOver', (data) => {
+    state.gameOverWinner = data;
+    if (data.winnerId === state.myId) {
+      flashMessage('YOU WIN!', '#FFE600');
+    } else {
+      flashMessage('GAME OVER', '#FF1493');
     }
   });
 }
 
-// ─── Network ─────────────────────────────────────────────────────────
-async function connectToServer() {
-  network = new NetworkClient();
-  chatUI = new ChatUI(network);
+// ─── Input ──────────────────────────────────────────────────────────
 
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = window.BABEL_SERVER_URL || `${protocol}//${location.host}`;
+document.addEventListener('keydown', (e) => {
+  const move = MOVE_KEYS[e.key];
+  if (!move || !state.room) return;
+  e.preventDefault();
 
-  network.onInitState = (data) => {
-    console.log('[Game] Init state received:', data);
-  };
+  const isCaller = state.myId === state.callerId;
+  const myPlayer = state.players.get(state.myId);
 
-  network.onWordPair = (data) => {
-    console.log('[Game] Word pair:', data.start, '→', data.target);
-    hud.resetJourney();
-    hud.setTarget(data.target);
-  };
+  // Calculate which subdivision slot we're in
+  const elapsed = Date.now() - state.barStartTime;
+  const slotDuration = state.barDurationMs / SUBDIVISIONS;
+  const slot = Math.min(Math.floor(elapsed / slotDuration), SUBDIVISIONS - 1);
 
-  network.onArticleData = (data) => {
-    console.log('[Game] Article data received:', data.title);
-    loadRoom(data);
-  };
+  // Prevent double-input on same slot
+  if (slot === state.lastInputSlot) return;
+  state.lastInputSlot = slot;
 
-  network.onArticleError = (data) => {
-    console.warn('[Game] Article error:', data.message);
-    portalManager.transitionComplete();
-  };
-
-  network.onJourneyComplete = async (data) => {
-    console.log('[Game] Journey complete!', data);
-    // Show win overlay, wait for dismissal, then request new pair
-    if (document.pointerLockElement) document.exitPointerLock();
-    await hud.showWin(data);
-    hud.resetJourney();
-    network.requestNewPair();
-  };
-
-  network.onPlayerJoin = (sessionId, color) => {
-    playerManager.addPlayer(sessionId, color);
-    hud.setPlayerCount(playerManager.getPlayerCount() + 1);
-  };
-
-  network.onPlayerLeave = (sessionId) => {
-    playerManager.removePlayer(sessionId);
-    hud.setPlayerCount(playerManager.getPlayerCount() + 1);
-  };
-
-  network.onPlayerMove = (sessionId, x, y, z, rotationY) => {
-    playerManager.updatePosition(sessionId, x, y, z, rotationY);
-  };
-
-  network.onPlayerArticleChange = (sessionId, article) => {
-    playerManager.setPlayerArticle(sessionId, article);
-  };
-
-  network.onChatBubble = (data) => {
-    chatUI.addMessage(data.sessionId, data.babelText);
-    playerManager.showChatBubble(data.sessionId, data.babelText);
-  };
-
-  const connected = await network.connect(wsUrl);
-  if (!connected) {
-    console.log('[Game] Running in offline mode');
-    // Load starting room offline
-    loadOfflineArticle('Library of Babel');
+  if (isCaller && (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2)) {
+    state.myInputs[slot] = move;
+    state.room.send('callerInput', { slot, move });
+  } else if (!isCaller && state.phase === PHASE.RESPONDING && myPlayer && myPlayer.alive) {
+    state.myInputs[slot] = move;
+    state.room.send('responderInput', { slot, move });
   }
-}
 
-// ─── Resume Hint ─────────────────────────────────────────────────────
-function showResumeHint() {
-  let hint = document.getElementById('resume-hint');
-  if (!hint) {
-    hint = document.createElement('div');
-    hint.id = 'resume-hint';
-    hint.textContent = 'click to resume';
-    hint.style.cssText = `
-      position: fixed; bottom: 50%; left: 50%; transform: translateX(-50%);
-      color: #999; font-family: monospace; font-size: 14px;
-      z-index: 90; pointer-events: none;
-    `;
-    document.body.appendChild(hint);
-  }
-  hint.style.display = 'block';
-}
+  // Beat pulse effect
+  state.beatPulse = 1.0;
+});
 
-function hideResumeHint() {
-  const hint = document.getElementById('resume-hint');
-  if (hint) hint.style.display = 'none';
-}
+// ─── Lobby UI ───────────────────────────────────────────────────────
 
-// ─── Physics / Movement ──────────────────────────────────────────────
-function updateMovement(dt) {
-  if (!state.locked) return;
+const lobbyEl = document.getElementById('lobby');
+const lobbyCount = document.getElementById('lobby-count');
+const startBtn = document.getElementById('start-btn');
 
-  // ─── Input direction ──────────────────────────────────────
-  const dir = new THREE.Vector3();
-  const forward = new THREE.Vector3();
-  const right = new THREE.Vector3();
+startBtn.addEventListener('click', () => {
+  if (state.room) state.room.send('requestStart');
+});
 
-  state.camera.getWorldDirection(forward);
-  forward.y = 0;
-  forward.normalize();
-  right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
-
-  if (state.movement.forward) dir.add(forward);
-  if (state.movement.backward) dir.sub(forward);
-  if (state.movement.left) dir.sub(right);
-  if (state.movement.right) dir.add(right);
-  if (dir.length() > 0) dir.normalize();
-
-  // ─── Horizontal movement (snappy ground, momentum in air) ──
-  const targetVx = dir.x * MOVE_SPEED;
-  const targetVz = dir.z * MOVE_SPEED;
-  const hasInput = dir.length() > 0.01;
-
-  if (state.onGround) {
-    // Ground: snap to target speed quickly, stop fast
-    const rate = hasInput ? GROUND_ACCEL : GROUND_DECEL;
-    state.velocity.x += (targetVx - state.velocity.x) * Math.min(1, rate * dt);
-    state.velocity.z += (targetVz - state.velocity.z) * Math.min(1, rate * dt);
+function updateLobbyCount() {
+  lobbyCount.textContent = state.players.size;
+  if (state.players.size >= 2) {
+    startBtn.disabled = false;
+    startBtn.textContent = 'BRING IT';
   } else {
-    // Air: slower steering, preserve momentum
-    const rate = hasInput ? AIR_ACCEL : AIR_DECEL;
-    state.velocity.x += (targetVx - state.velocity.x) * Math.min(1, rate * dt);
-    state.velocity.z += (targetVz - state.velocity.z) * Math.min(1, rate * dt);
+    startBtn.disabled = true;
+    startBtn.textContent = 'WAITING FOR PLAYERS';
+  }
+}
+
+function showLobby() { lobbyEl.classList.remove('hidden'); }
+function hideLobby() { lobbyEl.classList.add('hidden'); }
+
+// ─── Messages ───────────────────────────────────────────────────────
+
+function flashMessage(text, color = '#fff') {
+  state.message = text;
+  state.messageColor = color;
+  state.messageTimer = 120; // frames
+}
+
+// ─── Rendering ──────────────────────────────────────────────────────
+
+const MOVE_ARROWS = ['', '▲', '▼', '◄', '►'];
+const MOVE_COLORS = ['', '#00D4FF', '#FF1493', '#FFE600', '#00FF87'];
+
+function drawFrame(time) {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0a0a18');
+  grad.addColorStop(1, '#12081f');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Floor line
+  const floorY = H * 0.62;
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, floorY);
+  ctx.lineTo(W, floorY);
+  ctx.stroke();
+
+  if (state.phase === PHASE.LOBBY) return;
+
+  // Update bar progress
+  const elapsed = Date.now() - state.barStartTime;
+  state.barProgress = Math.min(elapsed / state.barDurationMs, 1.0);
+
+  // Beat pulse decay
+  state.beatPulse *= 0.92;
+
+  drawTopBar(time);
+  drawCharacters(floorY, time);
+  drawBeatLane(time);
+  drawMessage(time);
+  drawCountdown();
+}
+
+function drawTopBar(time) {
+  const isCaller = state.myId === state.callerId;
+  const myPlayer = state.players.get(state.myId);
+
+  // Phase label
+  let phaseText = '';
+  let phaseColor = '#666';
+  switch (state.phase) {
+    case PHASE.COUNTDOWN: phaseText = 'GET READY'; phaseColor = '#FFE600'; break;
+    case PHASE.CALLING_BAR1: phaseText = isCaller ? 'SET THE PATTERN (BAR 1)' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
+    case PHASE.CALLING_BAR2: phaseText = isCaller ? 'REPEAT IT (BAR 2)' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
+    case PHASE.RESPONDING: phaseText = isCaller ? 'WATCH THEM SWEAT' : 'YOUR TURN — COPY IT!'; phaseColor = '#00FF87'; break;
+    case PHASE.RESULTS: phaseText = 'RESULTS'; phaseColor = '#B24BF3'; break;
+    case PHASE.GAME_OVER: phaseText = 'GAME OVER'; phaseColor = '#FF1493'; break;
   }
 
-  // ─── Timers ───────────────────────────────────────────────
-  state.coyoteTimer -= dt;
-  state.jumpBufferTimer -= dt;
+  ctx.font = '900 18px Inter, sans-serif';
+  ctx.fillStyle = phaseColor;
+  ctx.textAlign = 'center';
+  ctx.fillText(phaseText, W / 2, 30);
 
-  if (state.onGround) {
-    state.coyoteTimer = COYOTE_TIME;
+  // Round + BPM
+  ctx.font = '700 13px Inter, sans-serif';
+  ctx.fillStyle = '#555';
+  ctx.textAlign = 'left';
+  ctx.fillText(`ROUND ${state.round}`, 16, 24);
+  ctx.fillText(`${state.bpm} BPM`, 16, 42);
+
+  // Player count
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#555';
+  ctx.fillText(`${state.alivePlayers} ALIVE`, W - 16, 24);
+
+  // Role indicator
+  if (myPlayer) {
+    ctx.fillStyle = isCaller ? '#FF6B35' : (myPlayer.alive ? '#00FF87' : '#FF3366');
+    const roleText = isCaller ? 'YOU ARE THE CALLER' : (myPlayer.alive ? 'RESPONDER' : 'ELIMINATED');
+    ctx.fillText(roleText, W - 16, 42);
   }
 
-  // ─── Jump logic ───────────────────────────────────────────
-  const canJump = state.coyoteTimer > 0;
-  const wantsJump = state.jumpBufferTimer > 0;
+  // Progress bar for current bar
+  if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 || state.phase === PHASE.RESPONDING) {
+    const barW = W - 32;
+    const barH = 4;
+    const barY = 52;
 
-  if (canJump && wantsJump) {
-    state.velocity.y = JUMP_FORCE;
-    state.coyoteTimer = 0;
-    state.jumpBufferTimer = 0;
-    state.onGround = false;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(16, barY, barW, barH);
+
+    // Beat markers
+    for (let i = 0; i <= BEATS_PER_BAR; i++) {
+      const x = 16 + (i / BEATS_PER_BAR) * barW;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(x - 1, barY - 2, 2, barH + 4);
+    }
+
+    // Progress fill
+    const fillColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(16, barY, barW * state.barProgress, barH);
+
+    // Current position marker
+    const markerX = 16 + barW * state.barProgress;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(markerX - 2, barY - 4, 4, barH + 8);
+  }
+}
+
+function drawCharacters(floorY, time) {
+  const callerPlayer = state.players.get(state.callerId);
+  const responders = [];
+
+  state.players.forEach((p, id) => {
+    if (id !== state.callerId) responders.push({ id, ...p });
+  });
+
+  // Draw responders behind (smaller, in a grid)
+  const responderY = floorY - 10;
+  const cols = Math.min(responders.length, 12);
+  const rows = Math.ceil(responders.length / cols);
+  const spacing = Math.min(60, (W - 100) / (cols || 1));
+
+  responders.forEach((r, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = W / 2 + (col - (cols - 1) / 2) * spacing;
+    const y = responderY - row * 50;
+    const size = 28;
+    drawCharacter(x, y, size, r.color, r.currentMove, r.alive, time);
+  });
+
+  // Draw caller in front (larger, centered)
+  if (callerPlayer) {
+    const callerX = W / 2;
+    const callerY = floorY - 20;
+    const callerSize = 65;
+    drawCharacter(callerX, callerY, callerSize, callerPlayer.color, callerPlayer.currentMove, true, time, true);
+
+    // "CALLER" label
+    ctx.font = '700 10px Inter, sans-serif';
+    ctx.fillStyle = '#FF6B35';
+    ctx.textAlign = 'center';
+    ctx.fillText('CALLER', callerX, callerY + callerSize * 0.6 + 14);
+  }
+}
+
+function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
+  const alpha = alive ? 1.0 : 0.25;
+  ctx.globalAlpha = alpha;
+
+  const headR = size * 0.2;
+  const bodyW = size * 0.35;
+  const bodyH = size * 0.4;
+  const limbW = size * 0.08;
+
+  // Body
+  ctx.fillStyle = color;
+  const bodyY = y - bodyH;
+
+  // Poses based on move
+  let headOffsetX = 0, headOffsetY = 0;
+  let leftArmAngle = 0, rightArmAngle = 0;
+  let squat = 0;
+
+  switch (move) {
+    case MOVE.UP:
+      leftArmAngle = -Math.PI * 0.8;
+      rightArmAngle = Math.PI * 0.8;
+      headOffsetY = -size * 0.08;
+      break;
+    case MOVE.DOWN:
+      squat = size * 0.15;
+      leftArmAngle = -Math.PI * 0.3;
+      rightArmAngle = Math.PI * 0.3;
+      break;
+    case MOVE.LEFT:
+      headOffsetX = -size * 0.08;
+      leftArmAngle = -Math.PI * 0.6;
+      rightArmAngle = Math.PI * 0.15;
+      break;
+    case MOVE.RIGHT:
+      headOffsetX = size * 0.08;
+      leftArmAngle = -Math.PI * 0.15;
+      rightArmAngle = Math.PI * 0.6;
+      break;
   }
 
-  // Variable jump height — cut velocity short when releasing
-  if (!state.jumpHeld && state.velocity.y > 0) {
-    state.velocity.y *= JUMP_CUT_MULTIPLIER;
-  }
+  const adjustedY = y + squat;
 
-  // ─── Wall slide & wall jump ───────────────────────────────
-  state.wallSlideDir = 0;
-  const wallLimit = state.roomRadius - PLAYER_RADIUS - 1.5;
-  const distFromCenter = Math.sqrt(
-    state.camera.position.x ** 2 + state.camera.position.z ** 2
+  // Legs
+  ctx.strokeStyle = color;
+  ctx.lineWidth = limbW;
+  ctx.lineCap = 'round';
+  // Left leg
+  ctx.beginPath();
+  ctx.moveTo(x - bodyW * 0.3, adjustedY);
+  ctx.lineTo(x - bodyW * 0.4, adjustedY + size * 0.3 - squat);
+  ctx.stroke();
+  // Right leg
+  ctx.beginPath();
+  ctx.moveTo(x + bodyW * 0.3, adjustedY);
+  ctx.lineTo(x + bodyW * 0.4, adjustedY + size * 0.3 - squat);
+  ctx.stroke();
+
+  // Body rectangle
+  const bx = x - bodyW / 2;
+  const by = adjustedY - bodyH;
+  ctx.fillStyle = color;
+  roundRect(ctx, bx, by, bodyW, bodyH, size * 0.06);
+  ctx.fill();
+
+  // Arms
+  const shoulderY = by + bodyH * 0.15;
+  const armLen = size * 0.35;
+  // Left arm
+  ctx.beginPath();
+  ctx.moveTo(x - bodyW / 2, shoulderY);
+  ctx.lineTo(
+    x - bodyW / 2 + Math.sin(leftArmAngle) * armLen,
+    shoulderY + Math.cos(leftArmAngle) * armLen
   );
+  ctx.stroke();
+  // Right arm
+  ctx.beginPath();
+  ctx.moveTo(x + bodyW / 2, shoulderY);
+  ctx.lineTo(
+    x + bodyW / 2 + Math.sin(rightArmAngle) * armLen,
+    shoulderY + Math.cos(rightArmAngle) * armLen
+  );
+  ctx.stroke();
 
-  if (!state.onGround && distFromCenter > wallLimit - 0.5 && state.velocity.y < 0) {
-    // Touching wall while falling — wall slide
-    state.wallSlideDir = 1;
-    state.velocity.y = Math.max(state.velocity.y, WALL_SLIDE_SPEED);
-    state.lastWallNormalX = -state.camera.position.x / distFromCenter;
-    state.lastWallNormalZ = -state.camera.position.z / distFromCenter;
+  // Head
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x + headOffsetX, by - headR * 0.5 + headOffsetY, headR, 0, Math.PI * 2);
+  ctx.fill();
 
-    // Wall jump
-    if (wantsJump) {
-      state.velocity.y = WALL_JUMP_FORCE_Y;
-      state.velocity.x = state.lastWallNormalX * WALL_JUMP_FORCE_XZ;
-      state.velocity.z = state.lastWallNormalZ * WALL_JUMP_FORCE_XZ;
-      state.jumpBufferTimer = 0;
-      state.coyoteTimer = 0;
+  // Glow for caller
+  if (isCaller && alive) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 15 + state.beatPulse * 20;
+    ctx.beginPath();
+    ctx.arc(x, by - headR * 0.5, headR * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // Eliminated X
+  if (!alive) {
+    ctx.strokeStyle = '#FF3366';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x - size * 0.2, by - size * 0.1);
+    ctx.lineTo(x + size * 0.2, by + size * 0.3);
+    ctx.moveTo(x + size * 0.2, by - size * 0.1);
+    ctx.lineTo(x - size * 0.2, by + size * 0.3);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+function drawBeatLane(time) {
+  const laneH = 140;
+  const laneY = H - laneH - 10;
+  const laneX = 40;
+  const laneW = W - 80;
+
+  // Background
+  ctx.fillStyle = 'rgba(15, 15, 30, 0.85)';
+  roundRect(ctx, laneX - 10, laneY - 10, laneW + 20, laneH + 20, 8);
+  ctx.fill();
+
+  // Determine what to show
+  const isCaller = state.myId === state.callerId;
+  const slotW = laneW / SUBDIVISIONS;
+
+  // Bar labels
+  ctx.font = '700 11px Inter, sans-serif';
+  ctx.textAlign = 'center';
+
+  if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) {
+    // Show both bars side by side
+    const halfW = laneW / 2 - 10;
+    const bar1X = laneX;
+    const bar2X = laneX + laneW / 2 + 10;
+    const sW = halfW / SUBDIVISIONS;
+
+    // Bar 1 label
+    ctx.fillStyle = state.phase === PHASE.CALLING_BAR1 ? '#FF6B35' : '#444';
+    ctx.fillText('BAR 1', bar1X + halfW / 2, laneY + 5);
+
+    // Bar 2 label
+    ctx.fillStyle = state.phase === PHASE.CALLING_BAR2 ? '#FF6B35' : '#444';
+    ctx.fillText('BAR 2', bar2X + halfW / 2, laneY + 5);
+
+    // Draw bar 1 slots
+    for (let i = 0; i < SUBDIVISIONS; i++) {
+      const sx = bar1X + i * sW;
+      const isGhost = state.phase === PHASE.CALLING_BAR1;
+      drawSlot(sx, laneY + 18, sW - 2, 50, state.bar1Pattern[i], isGhost);
     }
-  }
 
-  // ─── Gravity ──────────────────────────────────────────────
-  state.velocity.y += GRAVITY * dt;
-
-  // ─── Apply velocity ───────────────────────────────────────
-  let newX = state.camera.position.x + state.velocity.x * dt;
-  let newZ = state.camera.position.z + state.velocity.z * dt;
-  let newY = state.camera.position.y + state.velocity.y * dt;
-
-  // ─── Room boundary collision ──────────────────────────────
-  const newDist = Math.sqrt(newX * newX + newZ * newZ);
-  if (newDist > wallLimit) {
-    const angle = Math.atan2(newZ, newX);
-    newX = Math.cos(angle) * wallLimit;
-    newZ = Math.sin(angle) * wallLimit;
-  }
-
-  // ─── Platform collision ───────────────────────────────────
-  const feetY = newY - PLAYER_HEIGHT;
-  const prevFeetY = state.camera.position.y - PLAYER_HEIGHT;
-  state.onGround = false;
-
-  for (const p of state.roomPlatforms) {
-    // AABB: platform spans [p.x, p.x+p.w] x [p.y, p.y+p.h] x [p.z, p.z+p.d]
-    const inX = newX + PLAYER_RADIUS > p.x && newX - PLAYER_RADIUS < p.x + p.w;
-    const inZ = newZ + PLAYER_RADIUS > p.z && newZ - PLAYER_RADIUS < p.z + p.d;
-
-    if (inX && inZ) {
-      // Landing on top — feet were above or at platform top, now below
-      if (prevFeetY >= p.top - 0.3 && feetY < p.top) {
-        newY = p.top + PLAYER_HEIGHT;
-        state.velocity.y = 0;
-        state.onGround = true;
-      }
-      // Hitting bottom (head bonk)
-      else if (prevFeetY + PLAYER_HEIGHT <= p.y + 0.3 && newY > p.y) {
-        // Only bonk if moving up
-        if (state.velocity.y > 0) {
-          newY = p.y - 0.01;
-          state.velocity.y = 0;
-        }
-      }
-      // Side collision (push out horizontally)
-      else if (feetY < p.top && feetY + PLAYER_HEIGHT > p.y) {
-        const cx = p.cx;
-        const cz = p.cz;
-        const dx = newX - cx;
-        const dz = newZ - cz;
-        const halfW = p.w / 2 + PLAYER_RADIUS;
-        const halfD = p.d / 2 + PLAYER_RADIUS;
-
-        // Push out on the axis of least penetration
-        const overlapX = halfW - Math.abs(dx);
-        const overlapZ = halfD - Math.abs(dz);
-        if (overlapX < overlapZ) {
-          newX = cx + Math.sign(dx) * halfW;
-        } else {
-          newZ = cz + Math.sign(dz) * halfD;
-        }
-      }
+    // Draw bar 2 slots
+    for (let i = 0; i < SUBDIVISIONS; i++) {
+      const sx = bar2X + i * sW;
+      const isActive = state.phase === PHASE.CALLING_BAR2;
+      drawSlot(sx, laneY + 18, sW - 2, 50, state.bar2Pattern[i], false, isActive);
     }
+
+    // Divider
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(laneX + laneW / 2, laneY);
+    ctx.lineTo(laneX + laneW / 2, laneY + laneH);
+    ctx.stroke();
+
+  } else if (state.phase === PHASE.RESPONDING) {
+    // Show locked pattern on top, my inputs below
+    const rowH = 50;
+
+    ctx.fillStyle = '#FFE600';
+    ctx.fillText('PATTERN TO MATCH', laneX + laneW / 2, laneY + 5);
+
+    // Locked pattern
+    for (let i = 0; i < SUBDIVISIONS; i++) {
+      const sx = laneX + i * slotW;
+      drawSlot(sx, laneY + 15, slotW - 2, rowH - 5, state.lockedPattern[i], false, true);
+    }
+
+    // My inputs
+    ctx.fillStyle = '#00FF87';
+    ctx.fillText('YOUR INPUT', laneX + laneW / 2, laneY + rowH + 20);
+
+    for (let i = 0; i < SUBDIVISIONS; i++) {
+      const sx = laneX + i * slotW;
+      const matches = state.myInputs[i] === state.lockedPattern[i] || (state.lockedPattern[i] === 0 && state.myInputs[i] === 0);
+      drawSlot(sx, laneY + rowH + 28, slotW - 2, rowH - 5, state.myInputs[i], false, true, matches);
+    }
+
+  } else if (state.phase === PHASE.RESULTS || state.phase === PHASE.GAME_OVER) {
+    // Show the locked pattern
+    ctx.fillStyle = '#B24BF3';
+    ctx.fillText('PATTERN WAS', laneX + laneW / 2, laneY + 5);
+    for (let i = 0; i < SUBDIVISIONS; i++) {
+      const sx = laneX + i * slotW;
+      drawSlot(sx, laneY + 18, slotW - 2, 50, state.lockedPattern[i], false, true);
+    }
+
+    // Result message
+    ctx.font = '900 16px Inter, sans-serif';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText(state.resultMessage, laneX + laneW / 2, laneY + 90);
   }
 
-  // ─── Ceiling collision ────────────────────────────────────
-  if (newY > state.roomHeight - 1) {
-    newY = state.roomHeight - 1;
-    state.velocity.y = 0;
-  }
-
-  // ─── Respawn on fall ──────────────────────────────────────
-  if (newY < RESPAWN_Y) {
-    newX = 0;
-    newY = PLAYER_HEIGHT + 2;
-    newZ = 0;
-    state.velocity.set(0, 0, 0);
-  }
-
-  state.camera.position.set(newX, newY, newZ);
-
-  // Send position to server
-  if (network && network.connected) {
-    network.sendPosition(
-      state.camera.position.x,
-      state.camera.position.y,
-      state.camera.position.z,
-      state.euler.y
-    );
+  // Input hint
+  if (
+    (state.phase === PHASE.RESPONDING && state.myId !== state.callerId) ||
+    ((state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) && state.myId === state.callerId)
+  ) {
+    ctx.font = '700 11px Inter, sans-serif';
+    ctx.fillStyle = '#444';
+    ctx.textAlign = 'center';
+    ctx.fillText('▲ ▼ ◄ ► or W A S D', W / 2, H - 8);
   }
 }
 
-// ─── Resize ──────────────────────────────────────────────────────────
-function onResize() {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
+function drawSlot(x, y, w, h, move, isGhost = false, isActive = false, matches = true) {
+  // Background
+  ctx.fillStyle = isGhost ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.06)';
+  roundRect(ctx, x, y, w, h, 4);
+  ctx.fill();
 
-  state.camera.aspect = w / h;
-  state.camera.updateProjectionMatrix();
-  state.renderer.setSize(w, h);
-  state.renderTarget.setSize(w, h);
-  state.asciiMaterial.uniforms.resolution.value.set(w, h);
-}
+  // Border
+  ctx.strokeStyle = isGhost ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, h, 4);
+  ctx.stroke();
 
-// ─── Render Loop ─────────────────────────────────────────────────────
-function animate() {
-  requestAnimationFrame(animate);
+  if (move === 0) return;
 
-  const dt = Math.min(state.clock.getDelta(), 0.05);
-  const time = state.clock.getElapsedTime();
+  // Arrow
+  const arrow = MOVE_ARROWS[move];
+  const color = MOVE_COLORS[move];
 
-  updateMovement(dt);
-
-  // Portal proximity check
-  if (portalManager && state.locked) {
-    portalManager.update(state.camera.position);
-    const portalInfo = portalManager.getNearestPortalInfo();
-    if (hud) {
-      hud.showPortalHint(portalInfo ? portalInfo.title : null);
-    }
+  if (isGhost) {
+    ctx.globalAlpha = 0.3;
   }
 
-  // Room animations
-  updateRoomAnimations(state.roomGroup, time);
-
-  if (playerManager) {
-    playerManager.update(dt);
-    if (state.currentArticle) {
-      playerManager.filterByArticle(state.currentArticle);
-    }
-  }
-
-  state.asciiMaterial.uniforms.time.value = time;
-
-  if (state.asciiEnabled) {
-    state.renderer.setRenderTarget(state.renderTarget);
-    state.renderer.render(state.scene, state.camera);
-    state.renderer.setRenderTarget(null);
-    state.renderer.render(state.asciiScene, state.asciiCamera);
+  if (!matches && isActive) {
+    ctx.fillStyle = '#FF3366'; // wrong = red
   } else {
-    state.renderer.setRenderTarget(null);
-    state.renderer.render(state.scene, state.camera);
+    ctx.fillStyle = color;
   }
+
+  ctx.font = `900 ${Math.min(w * 0.6, h * 0.5)}px Inter, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(arrow, x + w / 2, y + h / 2);
+
+  // Move name below
+  ctx.font = `700 ${Math.min(9, w * 0.15)}px Inter, sans-serif`;
+  ctx.fillText(MOVE_NAMES[move], x + w / 2, y + h - 8);
+
+  ctx.globalAlpha = 1.0;
+  ctx.textBaseline = 'alphabetic';
 }
 
-// ─── Start ───────────────────────────────────────────────────────────
-init();
+function drawCountdown() {
+  if (state.phase !== PHASE.COUNTDOWN) return;
+
+  ctx.font = '900 160px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = '#FFE600';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = '#FFE600';
+  ctx.shadowBlur = 30;
+  ctx.fillText(state.countdown > 0 ? state.countdown : 'GO!', W / 2, H / 2 - 40);
+  ctx.shadowBlur = 0;
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMessage(time) {
+  if (state.messageTimer <= 0) return;
+  state.messageTimer--;
+
+  const alpha = Math.min(1, state.messageTimer / 30);
+  ctx.globalAlpha = alpha;
+  ctx.font = '900 42px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = state.messageColor || '#fff';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = state.messageColor || '#fff';
+  ctx.shadowBlur = 20;
+  ctx.fillText(state.message, W / 2, H * 0.35);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1.0;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ─── Game Loop ──────────────────────────────────────────────────────
+
+function gameLoop(time) {
+  drawFrame(time);
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── Init ───────────────────────────────────────────────────────────
+
+connect();
+requestAnimationFrame(gameLoop);

@@ -26,7 +26,7 @@ export class HUD {
       <div id="hud-breadcrumbs"></div>
       <div id="hud-players">WANDERERS: 1</div>
       <div id="hud-portal-hint" style="display:none"></div>
-      <div id="hud-controls">WASD move | SPACE jump | T chat | \` toggle ASCII</div>
+      <div id="hud-controls">WASD move | SPACE jump | SHIFT dash | T chat | \` toggle ASCII</div>
     `;
     document.body.appendChild(this.element);
 
