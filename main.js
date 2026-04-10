@@ -66,6 +66,8 @@ const state = {
   lastBeatIndex: -1,
   countInBeatMs: 600,
   countInStart: 0,
+  countInTotalMs: 2400,
+  predictedBarStart: 0,
 
   // Hit feedback — brief flashes on the judgment line
   hitFeedback: [], // { time, rating, color, alpha }
@@ -151,7 +153,14 @@ function setupRoomListeners() {
 
     if (data.barDurationMs) {
       state.barDurationMs = data.barDurationMs;
-      state.barStartTime = Date.now();
+      // Use predicted start from count-in if it's close (within 200ms)
+      // This makes the playhead seamlessly continue from the count-in approach
+      if (state.predictedBarStart && Math.abs(Date.now() - state.predictedBarStart) < 200) {
+        state.barStartTime = state.predictedBarStart;
+      } else {
+        state.barStartTime = Date.now();
+      }
+      state.predictedBarStart = 0;
     }
     if (data.bar1Pattern) state.bar1Pattern = [...data.bar1Pattern];
     if (data.pattern) state.lockedPattern = [...data.pattern];
@@ -159,9 +168,11 @@ function setupRoomListeners() {
     if (data.phase === PHASE.COUNTIN) {
       stopMetronome();
       state.lastCountdown = -1;
-      // Count-in uses its own beat-synced beeps via countdown listener
       if (data.beatMs) state.countInBeatMs = data.beatMs;
       state.countInStart = Date.now();
+      const totalBeats = data.totalBeats || 4;
+      state.countInTotalMs = data.beatMs * totalBeats;
+      state.predictedBarStart = Date.now() + state.countInTotalMs;
     }
     if (data.phase === PHASE.CALLING_BAR1 || data.phase === PHASE.CALLING_BAR2) {
       state.myInputs = [];
@@ -714,10 +725,43 @@ function drawHighway(time) {
     drawResultsTimeline(laneX, laneY, laneW, laneH, slotW);
   }
 
-  // Sweeping playhead
-  if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 || state.phase === PHASE.RESPONDING) {
-    const playX = laneX + state.barProgress * laneW;
-    const playColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+  // Count-in beat markers (approaching from left)
+  if (state.phase === PHASE.COUNTIN) {
+    const approachW = 80;
+    const countInProgress = Math.min((Date.now() - state.countInStart) / state.countInTotalMs, 1.0);
+    const totalBeats = 4;
+
+    for (let b = 0; b < totalBeats; b++) {
+      const beatProgress = b / totalBeats;
+      const bx = laneX - approachW + beatProgress * approachW;
+      const isPast = countInProgress > beatProgress;
+      const beatNum = b + 1;
+      const label = b < 3 ? String(beatNum) : 'GO';
+
+      ctx.font = '900 16px "Bebas Neue", Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = isPast ? '#FF6B35' : '#FF6B3544';
+      ctx.fillText(label, bx, laneY + laneH / 2 + 6);
+    }
+  }
+
+  // Sweeping playhead — also during count-in (approaches from left)
+  const showPlayhead = state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 ||
+                       state.phase === PHASE.RESPONDING || state.phase === PHASE.COUNTIN;
+  if (showPlayhead) {
+    let playX;
+    let playColor;
+
+    if (state.phase === PHASE.COUNTIN) {
+      // During count-in: playhead approaches from the left toward position 0
+      const countInProgress = Math.min((Date.now() - state.countInStart) / state.countInTotalMs, 1.0);
+      const approachWidth = 80; // px of lead-in space to the left of the lane
+      playX = laneX - approachWidth + countInProgress * approachWidth;
+      playColor = '#FF6B35';
+    } else {
+      playX = laneX + state.barProgress * laneW;
+      playColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+    }
 
     // Glow trail behind playhead
     const trailGrad = ctx.createLinearGradient(playX - 60, 0, playX, 0);
