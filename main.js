@@ -13,8 +13,8 @@ import {
 import {
   initAudio, playInputSound, playMetronomeTick,
   playPatternLocked, playCallerFailed, playSurvived,
-  playEliminated, playCountdownBeep, playVictory,
-  playGameOver, startMetronome, stopMetronome,
+  playEliminated, playCountdownBeep, playCountInBeat, playVictory,
+  playGameOver, playTimingHit, startMetronome, stopMetronome,
   setMuted, isMuted,
 } from './client/audio.js';
 
@@ -69,9 +69,19 @@ const state = {
   countInTotalMs: 2400,
   predictedBarStart: 0,
   isCountIn: false,
+  countInLastBeat: -1,
 
   // Hit feedback — brief flashes on the judgment line
   hitFeedback: [], // { time, rating, color, alpha }
+
+  // Combo tracking
+  combo: 0,
+  maxCombo: 0,
+  comboScale: 1.0,
+
+  // Beat flash (timeline slot illumination on metronome tick)
+  beatFlashAlpha: 0,
+  beatFlashSlot: -1,
 };
 
 // ─── Canvas Setup ───────────────────────────────────────────────────
@@ -114,8 +124,11 @@ function setupRoomListeners() {
   room.state.listen('callerId', (val) => { state.callerId = val; });
   room.state.listen('countdown', (val) => {
     state.countdown = val;
-    if (val !== state.lastCountdown && (state.phase === PHASE.COUNTDOWN || state.phase === PHASE.COUNTIN)) {
-      playCountdownBeep(val);
+    if (val !== state.lastCountdown) {
+      if (state.phase === PHASE.COUNTDOWN) {
+        playCountdownBeep(val);
+      }
+      // Count-in beats are handled by client-side elapsed time tracking
       state.lastCountdown = val;
     }
   });
@@ -152,6 +165,9 @@ function setupRoomListeners() {
     state.lastResults = null;
     state.hitFeedback = [];
     state.isCountIn = (data.phase === PHASE.COUNTIN);
+    state.combo = 0;
+    state.maxCombo = 0;
+    state.comboScale = 1.0;
 
     if (data.barDurationMs) {
       state.barDurationMs = data.barDurationMs;
@@ -163,6 +179,7 @@ function setupRoomListeners() {
     if (data.phase === PHASE.COUNTIN) {
       stopMetronome();
       state.lastCountdown = -1;
+      state.countInLastBeat = -1;
       if (data.beatMs) state.countInBeatMs = data.beatMs;
       state.countInStart = Date.now();
       const totalBeats = data.totalBeats || 4;
@@ -295,6 +312,21 @@ document.addEventListener('keydown', (e) => {
     // Check timing against locked pattern — find closest matching beat
     const rating = getTimingRating(timeInBar, move, state.lockedPattern);
     addHitFeedback(rating, MOVE_COLORS[move]);
+    playTimingHit(rating);
+
+    // Combo tracking
+    if (rating === 'PERFECT' || rating === 'GREAT' || rating === 'GOOD') {
+      state.combo++;
+      state.comboScale = 1.4;
+      if (state.combo > state.maxCombo) state.maxCombo = state.combo;
+      if (state.combo >= 3) {
+        spawnParticles(W / 2, H - 200, MOVE_COLORS[move], Math.min(state.combo, 8));
+      }
+    } else {
+      state.combo = 0;
+      state.comboScale = 1.0;
+      state.screenShake = 4;
+    }
   }
 
   state.beatPulse = 1.0;
@@ -322,11 +354,15 @@ function addHitFeedback(rating, color) {
     'MISS': '#FF3366',
     'INPUT': '#FF6B35',
   };
+  const laneX = 50;
+  const laneW = W - 100;
+  const playX = laneX + state.barProgress * laneW;
   state.hitFeedback.push({
     rating,
     color: ratingColors[rating] || color,
     alpha: 1.0,
     y: 0,
+    x: playX,
   });
 }
 
@@ -464,9 +500,26 @@ function drawFrame(time) {
     if (beatIndex !== state.lastBeatIndex && beatIndex < BEATS_PER_BAR) {
       state.lastBeatIndex = beatIndex;
       state.beatPulse = Math.max(state.beatPulse, 0.6);
+      // Flash the current beat slot on the timeline
+      state.beatFlashAlpha = 0.4;
+      state.beatFlashSlot = beatIndex * 2; // 2 subdivisions per beat
     }
   }
+
+  // Count-in: play beat sounds client-side based on elapsed time
+  if (state.isCountIn && state.phase === PHASE.COUNTIN) {
+    const countInElapsed = Date.now() - state.countInStart;
+    const countInBeat = Math.floor(countInElapsed / state.countInBeatMs);
+    if (countInBeat !== state.countInLastBeat && countInBeat < 4) {
+      state.countInLastBeat = countInBeat;
+      state.beatPulse = 0.8;
+      playCountInBeat(countInBeat);
+    }
+  }
+
   state.beatPulse *= 0.92;
+  state.beatFlashAlpha *= 0.88;
+  state.comboScale += (1.0 - state.comboScale) * 0.15;
 
   drawTopBar(time);
   drawCharacters(floorY, time);
@@ -582,13 +635,28 @@ function drawCharacters(floorY, time) {
     const callerY = floorY - 20;
     const callerSize = 60;
 
-    const spotGrad = ctx.createRadialGradient(callerX, callerY - 20, 0, callerX, callerY - 20, callerSize * 2);
-    spotGrad.addColorStop(0, callerPlayer.color + '18');
+    // Pulsing spotlight
+    const spotPulse = 1 + state.beatPulse * 0.3;
+    const spotGrad = ctx.createRadialGradient(callerX, callerY - 20, 0, callerX, callerY - 20, callerSize * 2 * spotPulse);
+    spotGrad.addColorStop(0, callerPlayer.color + '20');
+    spotGrad.addColorStop(0.6, callerPlayer.color + '08');
     spotGrad.addColorStop(1, 'transparent');
     ctx.fillStyle = spotGrad;
     ctx.beginPath();
-    ctx.ellipse(callerX, callerY, callerSize * 2, callerSize * 1.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(callerX, callerY, callerSize * 2.5, callerSize * 1.8, 0, 0, Math.PI * 2);
     ctx.fill();
+
+    // Beat ring (expanding ring on pulse)
+    if (state.beatPulse > 0.1) {
+      const ringR = callerSize * (1.5 + (1 - state.beatPulse) * 1.5);
+      ctx.strokeStyle = callerPlayer.color;
+      ctx.globalAlpha = state.beatPulse * 0.3;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.ellipse(callerX, callerY, ringR, ringR * 0.4, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
     drawCharacter(callerX, callerY, callerSize, callerPlayer.color, callerPlayer.currentMove, true, time, true);
 
@@ -609,23 +677,28 @@ function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
   const bodyH = size * 0.4;
   const limbW = Math.max(size * 0.08, 2);
 
-  let headOffsetX = 0, headOffsetY = 0;
+  // Idle breathing animation
+  const breathe = alive ? Math.sin(time * 0.003) * size * 0.015 : 0;
+  // Beat bob
+  const beatBob = alive ? state.beatPulse * size * 0.06 : 0;
+
+  let headOffsetX = 0, headOffsetY = breathe - beatBob;
   let leftArmAngle = 0, rightArmAngle = 0;
   let squat = 0, bodyTilt = 0;
 
   switch (move) {
     case MOVE.UP:
       leftArmAngle = -Math.PI * 0.8; rightArmAngle = Math.PI * 0.8;
-      headOffsetY = -size * 0.08; break;
+      headOffsetY = -size * 0.1; break;
     case MOVE.DOWN:
-      squat = size * 0.15;
+      squat = size * 0.18;
       leftArmAngle = -Math.PI * 0.3; rightArmAngle = Math.PI * 0.3; break;
     case MOVE.LEFT:
-      headOffsetX = -size * 0.08; bodyTilt = -0.1;
-      leftArmAngle = -Math.PI * 0.6; rightArmAngle = Math.PI * 0.15; break;
+      headOffsetX = -size * 0.1; bodyTilt = -0.12;
+      leftArmAngle = -Math.PI * 0.7; rightArmAngle = Math.PI * 0.15; break;
     case MOVE.RIGHT:
-      headOffsetX = size * 0.08; bodyTilt = 0.1;
-      leftArmAngle = -Math.PI * 0.15; rightArmAngle = Math.PI * 0.6; break;
+      headOffsetX = size * 0.1; bodyTilt = 0.12;
+      leftArmAngle = -Math.PI * 0.15; rightArmAngle = Math.PI * 0.7; break;
   }
 
   ctx.save();
@@ -797,8 +870,6 @@ function drawHighway(time) {
 }
 
 function drawSlotGrid(laneX, laneY, laneW, laneH, slotW) {
-  const beatDuration = state.barDurationMs / BEATS_PER_BAR;
-
   for (let i = 0; i < SUBDIVISIONS; i++) {
     const sx = laneX + i * slotW;
     const isDownbeat = i % 2 === 0;
@@ -807,22 +878,30 @@ function drawSlotGrid(laneX, laneY, laneW, laneH, slotW) {
     ctx.fillStyle = isDownbeat ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.012)';
     ctx.fillRect(sx, laneY, slotW - 1, laneH);
 
+    // Beat flash — illuminates the slot when metronome ticks
+    if (state.beatFlashAlpha > 0.01 && state.beatFlashSlot === i) {
+      const flashColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+      ctx.fillStyle = flashColor;
+      ctx.globalAlpha = state.beatFlashAlpha;
+      ctx.fillRect(sx, laneY, slotW - 1, laneH);
+      ctx.globalAlpha = 1;
+    }
+
     // Beat number at top for downbeats
     if (i % 2 === 0) {
       ctx.font = '700 9px Inter, sans-serif';
-      ctx.fillStyle = '#333';
+      ctx.fillStyle = '#444';
       ctx.textAlign = 'center';
       ctx.fillText(String(i / 2 + 1), sx + slotW / 2, laneY - 4);
     }
   }
 
   // Vertical grid lines
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 1;
   for (let i = 0; i <= SUBDIVISIONS; i++) {
     const x = laneX + i * slotW;
     const isBeat = i % 2 === 0;
     ctx.strokeStyle = isBeat ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x, laneY);
     ctx.lineTo(x, laneY + laneH);
@@ -920,6 +999,26 @@ function drawRespondingTimeline(laneX, laneY, laneW, laneH, slotW) {
     drawTimelineNote(sx, laneY + halfH + 8, slotW - 4, halfH, beat.move, ratingColor);
   }
 
+  // Combo counter
+  if (state.combo >= 2) {
+    ctx.save();
+    ctx.translate(laneX + laneW + 30, laneY + laneH / 2);
+    ctx.scale(state.comboScale, state.comboScale);
+    const comboColor = state.combo >= 8 ? '#FFE600' : state.combo >= 5 ? '#FF6B35' : '#00FF87';
+    ctx.font = '900 28px "Bebas Neue", Inter, sans-serif';
+    ctx.fillStyle = comboColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = comboColor;
+    ctx.shadowBlur = 12;
+    ctx.fillText(`${state.combo}x`, 0, 0);
+    ctx.font = '700 9px Inter, sans-serif';
+    ctx.fillText('COMBO', 0, 16);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.textBaseline = 'alphabetic';
+  }
+
   // Label
   ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
   ctx.fillStyle = '#00FF87';
@@ -928,28 +1027,65 @@ function drawRespondingTimeline(laneX, laneY, laneW, laneH, slotW) {
 }
 
 function drawResultsTimeline(laneX, laneY, laneW, laneH, slotW) {
-  // Show locked pattern across full height
+  // Show locked pattern across full height (dimmed)
   for (const beat of state.lockedPattern) {
     const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
-    drawTimelineNote(sx, laneY + 5, slotW - 4, laneH - 10, beat.move, null, 0.4);
+    drawTimelineNote(sx, laneY + 5, slotW - 4, laneH - 10, beat.move, null, 0.15);
   }
 
-  // Results text
-  ctx.font = '900 22px "Bebas Neue", Inter, sans-serif';
-  ctx.fillStyle = '#B24BF3';
-  ctx.textAlign = 'center';
-  ctx.fillText(state.resultMessage, laneX + laneW / 2, laneY + laneH / 2 - 10);
+  const cx = laneX + laneW / 2;
 
-  if (state.lastResults) {
-    const r = state.lastResults;
-    ctx.font = '700 12px Inter, sans-serif';
-    const parts = [];
-    if (r.perfectCount > 0) parts.push(`PERFECT: ${r.perfectCount}`);
-    if (r.greatCount > 0) parts.push(`GREAT: ${r.greatCount}`);
-    if (r.goodCount > 0) parts.push(`GOOD: ${r.goodCount}`);
-    if (r.missCount > 0) parts.push(`MISS: ${r.missCount}`);
-    ctx.fillStyle = '#777';
-    ctx.fillText(parts.join('  •  '), laneX + laneW / 2, laneY + laneH / 2 + 14);
+  if (state.gameOverWinner) {
+    // Game over screen
+    const isWinner = state.gameOverWinner.winnerId === state.myId;
+    ctx.font = '900 36px "Bebas Neue", Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = isWinner ? '#FFE600' : '#FF1493';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = isWinner ? '#FFE600' : '#FF1493';
+    ctx.fillText(isWinner ? '★ CHAMPION ★' : 'GAME OVER', cx, laneY + laneH / 2 - 5);
+    ctx.shadowBlur = 0;
+    if (state.gameOverWinner.winnerColor && !isWinner) {
+      ctx.font = '700 13px Inter, sans-serif';
+      ctx.fillStyle = state.gameOverWinner.winnerColor;
+      ctx.fillText('Winner', cx, laneY + laneH / 2 + 18);
+    }
+  } else {
+    // Round results
+    ctx.font = '900 24px "Bebas Neue", Inter, sans-serif';
+    ctx.fillStyle = '#B24BF3';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.resultMessage, cx, laneY + laneH / 2 - 18);
+
+    if (state.lastResults) {
+      const r = state.lastResults;
+      // Score breakdown with colored labels
+      const y = laneY + laneH / 2 + 6;
+      ctx.font = '700 13px Inter, sans-serif';
+
+      const items = [];
+      if (r.perfectCount > 0) items.push({ label: `PERFECT ×${r.perfectCount}`, color: '#FFE600' });
+      if (r.greatCount > 0) items.push({ label: `GREAT ×${r.greatCount}`, color: '#00FF87' });
+      if (r.goodCount > 0) items.push({ label: `GOOD ×${r.goodCount}`, color: '#00D4FF' });
+      if (r.missCount > 0) items.push({ label: `MISS ×${r.missCount}`, color: '#FF3366' });
+
+      const totalW = items.reduce((sum, it) => sum + ctx.measureText(it.label).width + 20, 0);
+      let drawX = cx - totalW / 2;
+      for (const item of items) {
+        ctx.fillStyle = item.color;
+        ctx.textAlign = 'left';
+        ctx.fillText(item.label, drawX, y);
+        drawX += ctx.measureText(item.label).width + 20;
+      }
+
+      // Score and combo
+      ctx.textAlign = 'center';
+      ctx.font = '700 11px Inter, sans-serif';
+      ctx.fillStyle = '#666';
+      let statLine = `SCORE: +${r.score}`;
+      if (state.maxCombo >= 2) statLine += `  •  MAX COMBO: ${state.maxCombo}x`;
+      ctx.fillText(statLine, cx, y + 20);
+    }
   }
 }
 
@@ -957,20 +1093,22 @@ function drawTimelineNote(x, y, w, h, move, overrideColor = null, alpha = 1.0) {
   const color = overrideColor || MOVE_COLORS[move];
   ctx.globalAlpha = alpha;
 
-  // Filled box with rounded corners
-  ctx.fillStyle = color + '30';
+  // Filled box with gradient
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, color + '40');
+  grad.addColorStop(0.5, color + '20');
+  grad.addColorStop(1, color + '35');
+  ctx.fillStyle = grad;
   roundRect(ctx, x, y, w, h, 5);
   ctx.fill();
 
-  // Border
-  ctx.strokeStyle = color + '88';
+  // Border with glow
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+  ctx.strokeStyle = color + 'AA';
   ctx.lineWidth = 1.5;
   roundRect(ctx, x, y, w, h, 5);
   ctx.stroke();
-
-  // Glow
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 4;
 
   // Arrow
   const fontSize = Math.min(w * 0.5, h * 0.4, 28);
@@ -986,21 +1124,31 @@ function drawTimelineNote(x, y, w, h, move, overrideColor = null, alpha = 1.0) {
 }
 
 function drawHitFeedback() {
+  const laneH = 160;
+  const laneY = H - laneH - 20;
+  const laneX = 50;
+  const laneW = W - 100;
+
+  // Calculate playhead X for positioning
+  const playX = laneX + state.barProgress * laneW;
+
   for (let i = state.hitFeedback.length - 1; i >= 0; i--) {
     const fb = state.hitFeedback[i];
-    fb.alpha -= 0.025;
-    fb.y -= 1.5;
+    fb.alpha -= 0.02;
+    fb.y -= 2;
     if (fb.alpha <= 0) {
       state.hitFeedback.splice(i, 1);
       continue;
     }
+
+    const fbX = fb.x || playX;
     ctx.globalAlpha = fb.alpha;
-    ctx.font = '900 16px "Bebas Neue", Inter, sans-serif';
+    ctx.font = '900 18px "Bebas Neue", Inter, sans-serif';
     ctx.fillStyle = fb.color;
     ctx.textAlign = 'center';
     ctx.shadowColor = fb.color;
-    ctx.shadowBlur = 6;
-    ctx.fillText(fb.rating, 90, H - 230 + fb.y);
+    ctx.shadowBlur = 8;
+    ctx.fillText(fb.rating, fbX, laneY - 20 + fb.y);
     ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
@@ -1009,31 +1157,38 @@ function drawHitFeedback() {
 function drawCountdown() {
   if (state.phase !== PHASE.COUNTDOWN && state.phase !== PHASE.COUNTIN) return;
 
-  let text, color;
+  let text, color, beatFrac;
   if (state.isCountIn) {
     // Count-in: use elapsed time from countInStart for reliable display
     const elapsed = Date.now() - state.countInStart;
     const beatNum = Math.min(Math.floor(elapsed / state.countInBeatMs), 3);
+    beatFrac = (elapsed % state.countInBeatMs) / state.countInBeatMs;
     text = beatNum < 3 ? String(beatNum + 1) : 'GO!';
     color = beatNum < 3 ? '#FF6B35' : '#00FF87';
   } else {
     text = state.countdown > 0 ? String(state.countdown) : 'GO!';
     color = state.countdown > 0 ? '#FFE600' : '#00FF87';
+    beatFrac = 0;
   }
-  const pulse = 1 + state.beatPulse * 0.2;
+
+  // Pop-in animation: starts big and settles to base size
+  const popScale = 1 + Math.max(0, 0.3 - beatFrac * 0.8);
+  const alphaFade = state.isCountIn ? Math.max(0.3, 1 - beatFrac * 0.7) : 1;
 
   ctx.save();
   ctx.translate(W / 2, H / 2 - 60);
-  ctx.scale(pulse, pulse);
+  ctx.scale(popScale, popScale);
+  ctx.globalAlpha = alphaFade;
   ctx.font = '900 180px "Bebas Neue", Inter, sans-serif';
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.shadowColor = color;
-  ctx.shadowBlur = 40;
+  ctx.shadowBlur = 40 + (1 - beatFrac) * 30;
   ctx.fillText(text, 0, 0);
+  // Outer glow layer
   ctx.shadowBlur = 80;
-  ctx.globalAlpha = 0.3;
+  ctx.globalAlpha = 0.15 * alphaFade;
   ctx.fillText(text, 0, 0);
   ctx.restore();
   ctx.textBaseline = 'alphabetic';

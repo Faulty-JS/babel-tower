@@ -2,20 +2,31 @@
  * BRING IT — Audio Engine
  *
  * All sounds synthesized via Web Audio API — zero asset loading.
- * Provides metronome, input feedback, success/fail stings, and ambient pulse.
+ * Provides metronome, input feedback, timing-rated hits, stings, and ambient pulse.
  */
 
 let ctx = null;
 let masterGain = null;
 let muted = false;
+let compressor = null;
 
 // Lazy-init on first user gesture (browser autoplay policy)
 export function initAudio() {
   if (ctx) return;
   ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Compressor to prevent clipping when many sounds play at once
+  compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.value = -18;
+  compressor.knee.value = 12;
+  compressor.ratio.value = 6;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.15;
+  compressor.connect(ctx.destination);
+
   masterGain = ctx.createGain();
   masterGain.gain.value = 0.5;
-  masterGain.connect(ctx.destination);
+  masterGain.connect(compressor);
 }
 
 export function setMuted(val) { muted = val; }
@@ -26,7 +37,7 @@ function now() { return ctx ? ctx.currentTime : 0; }
 // ─── Helpers ────────────────────────────────────────────────
 
 function osc(type, freq, startTime, duration, gain = 0.3) {
-  if (!ctx || muted) return;
+  if (!ctx || muted) return null;
   const o = ctx.createOscillator();
   const g = ctx.createGain();
   o.type = type;
@@ -37,11 +48,28 @@ function osc(type, freq, startTime, duration, gain = 0.3) {
   g.connect(masterGain);
   o.start(startTime);
   o.stop(startTime + duration);
+  return o;
+}
+
+function oscSweep(type, freqStart, freqEnd, startTime, duration, gain = 0.3) {
+  if (!ctx || muted) return null;
+  const o = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freqStart, startTime);
+  o.frequency.exponentialRampToValueAtTime(freqEnd, startTime + duration);
+  g.gain.setValueAtTime(gain, startTime);
+  g.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+  o.connect(g);
+  g.connect(masterGain);
+  o.start(startTime);
+  o.stop(startTime + duration);
+  return o;
 }
 
 function noise(startTime, duration, gain = 0.1) {
   if (!ctx || muted) return;
-  const bufferSize = ctx.sampleRate * duration;
+  const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * duration));
   const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
   const data = buffer.getChannelData(0);
   for (let i = 0; i < bufferSize; i++) {
@@ -96,6 +124,36 @@ export function playInputSound(move) {
   noise(t, 0.02, 0.04);
 }
 
+// ─── Timing-Rated Hit Sounds ────────────────────────────────
+
+export function playTimingHit(rating) {
+  if (!ctx || muted) return;
+  const t = now();
+  switch (rating) {
+    case 'PERFECT':
+      // Bright sparkle — high harmonics + shimmer
+      osc('sine', 1047, t, 0.1, 0.2);
+      osc('sine', 1568, t + 0.02, 0.08, 0.12);
+      osc('triangle', 2093, t + 0.03, 0.06, 0.06);
+      noise(t, 0.04, 0.03);
+      break;
+    case 'GREAT':
+      // Clean chime
+      osc('sine', 880, t, 0.1, 0.18);
+      osc('triangle', 1320, t + 0.02, 0.06, 0.06);
+      break;
+    case 'GOOD':
+      // Soft thud + tone
+      osc('sine', 660, t, 0.08, 0.12);
+      break;
+    case 'MISS':
+      // Dull buzz
+      osc('sawtooth', 120, t, 0.12, 0.08);
+      noise(t, 0.06, 0.05);
+      break;
+  }
+}
+
 // ─── Pattern Locked ─────────────────────────────────────────
 
 export function playPatternLocked() {
@@ -147,15 +205,38 @@ export function playCountdownBeep(num) {
   if (!ctx || muted) return;
   const t = now();
   if (num > 0) {
-    osc('sine', 660, t, 0.1, 0.3);
-    osc('triangle', 660, t, 0.08, 0.1);
+    // Pitched countdown: higher as it gets closer to GO
+    const pitch = 440 + (4 - num) * 110;
+    osc('sine', pitch, t, 0.12, 0.3);
+    osc('triangle', pitch, t, 0.08, 0.08);
+    noise(t, 0.01, 0.04);
   } else {
-    // "GO!" — big chord
+    // "GO!" — big power chord with sweep
+    osc('square', 523, t, 0.25, 0.15);
+    osc('square', 659, t, 0.25, 0.15);
+    osc('square', 784, t, 0.25, 0.15);
+    osc('sawtooth', 1047, t, 0.4, 0.1);
+    oscSweep('sine', 400, 1600, t, 0.2, 0.08);
+    noise(t, 0.12, 0.08);
+  }
+}
+
+// ─── Count-in Beat (at BPM tempo) ──────────────────────────
+
+export function playCountInBeat(beatNum) {
+  if (!ctx || muted) return;
+  const t = now();
+  if (beatNum < 3) {
+    // "1", "2", "3" — wood block style
+    osc('triangle', 900 + beatNum * 100, t, 0.06, 0.25);
+    noise(t, 0.02, 0.1);
+  } else {
+    // "GO!" — accent
     osc('square', 523, t, 0.2, 0.15);
-    osc('square', 659, t, 0.2, 0.15);
     osc('square', 784, t, 0.2, 0.15);
-    osc('sawtooth', 1047, t, 0.35, 0.1);
-    noise(t, 0.1, 0.08);
+    osc('sawtooth', 1047, t, 0.3, 0.1);
+    oscSweep('sine', 500, 2000, t, 0.15, 0.06);
+    noise(t, 0.08, 0.06);
   }
 }
 
