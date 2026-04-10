@@ -670,100 +670,84 @@ function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
   ctx.globalAlpha = 1.0;
 }
 
-// ─── SCROLLING HIGHWAY ─────────────────────────────────────────────
+// ─── TIMELINE (static boxes + sweeping playhead) ───────────────────
+
+function snapToGrid(timeMs) {
+  // Snap to nearest 8th note for display position
+  const subdivMs = state.barDurationMs / SUBDIVISIONS;
+  return Math.round(timeMs / subdivMs) * subdivMs;
+}
+
+function timeToX(timeMs, laneX, laneW) {
+  // Map a time (0 → barDurationMs) to pixel position across the lane
+  return laneX + (timeMs / state.barDurationMs) * laneW;
+}
 
 function drawHighway(time) {
-  const hwyH = 180;
-  const hwyY = H - hwyH - 20;
-  const hwyX = 50;
-  const hwyW = W - 100;
+  const laneH = 160;
+  const laneY = H - laneH - 20;
+  const laneX = 50;
+  const laneW = W - 100;
 
-  // Background
+  // Background panel
   ctx.fillStyle = 'rgba(10, 10, 25, 0.92)';
-  roundRect(ctx, hwyX - 14, hwyY - 14, hwyW + 28, hwyH + 28, 10);
+  roundRect(ctx, laneX - 14, laneY - 14, laneW + 28, laneH + 28, 10);
   ctx.fill();
-
   const borderColor = state.phase === PHASE.RESPONDING ? '#00FF8720' : '#FF6B3520';
   ctx.strokeStyle = borderColor;
   ctx.lineWidth = 1;
-  roundRect(ctx, hwyX - 14, hwyY - 14, hwyW + 28, hwyH + 28, 10);
+  roundRect(ctx, laneX - 14, laneY - 14, laneW + 28, laneH + 28, 10);
   ctx.stroke();
 
-  // Judgment line — left side, where you play
-  const judgX = hwyX + 80;
+  const slotW = laneW / SUBDIVISIONS;
+  const isCaller = state.myId === state.callerId;
 
-  // Draw based on phase
+  // Draw subdivision grid (the boxes)
+  drawSlotGrid(laneX, laneY, laneW, laneH, slotW);
+
+  // Draw content based on phase
   if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) {
-    drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, state.phase === PHASE.CALLING_BAR1 ? state.bar1Pattern : state.bar2Pattern, true);
-    // Show bar1 pattern as ghost on top during bar2
-    if (state.phase === PHASE.CALLING_BAR2) {
-      drawGhostPattern(hwyX, hwyY, hwyW, hwyH, judgX, state.bar1Pattern);
-    }
+    drawCallingTimeline(laneX, laneY, laneW, laneH, slotW);
   } else if (state.phase === PHASE.RESPONDING) {
-    // Show the locked pattern scrolling + player inputs
-    drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, state.lockedPattern, false, state.myInputs);
+    drawRespondingTimeline(laneX, laneY, laneW, laneH, slotW);
   } else if (state.phase === PHASE.RESULTS || state.phase === PHASE.GAME_OVER) {
-    drawResultsLane(hwyX, hwyY, hwyW, hwyH, judgX);
+    drawResultsTimeline(laneX, laneY, laneW, laneH, slotW);
   }
 
-  // Beat grid lines (vertical, for orientation)
-  const beatDuration = state.barDurationMs / BEATS_PER_BAR;
-  const elapsed = Date.now() - state.barStartTime;
-  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+  // Sweeping playhead
+  if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 || state.phase === PHASE.RESPONDING) {
+    const playX = laneX + state.barProgress * laneW;
+    const playColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 1;
-  for (let b = 0; b < BEATS_PER_BAR; b++) {
-    const beatTime = b * beatDuration;
-    const screenX = judgX + (beatTime - elapsed) * pixPerMs;
-    if (screenX > hwyX && screenX < hwyX + hwyW) {
-      ctx.beginPath();
-      ctx.moveTo(screenX, hwyY);
-      ctx.lineTo(screenX, hwyY + hwyH);
-      ctx.stroke();
-    }
+    // Glow trail behind playhead
+    const trailGrad = ctx.createLinearGradient(playX - 60, 0, playX, 0);
+    trailGrad.addColorStop(0, 'transparent');
+    trailGrad.addColorStop(1, playColor + '15');
+    ctx.fillStyle = trailGrad;
+    ctx.fillRect(laneX, laneY, playX - laneX, laneH);
+
+    // Playhead line
+    ctx.strokeStyle = playColor;
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = playColor;
+    ctx.shadowBlur = 10 + state.beatPulse * 15;
+    ctx.beginPath();
+    ctx.moveTo(playX, laneY - 6);
+    ctx.lineTo(playX, laneY + laneH + 6);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Small triangle on top
+    ctx.fillStyle = playColor;
+    ctx.beginPath();
+    ctx.moveTo(playX, laneY - 6);
+    ctx.lineTo(playX - 5, laneY - 12);
+    ctx.lineTo(playX + 5, laneY - 12);
+    ctx.closePath();
+    ctx.fill();
   }
-
-  // Judgment line glow
-  ctx.strokeStyle = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
-  ctx.lineWidth = 2;
-  ctx.shadowColor = ctx.strokeStyle;
-  ctx.shadowBlur = 8 + state.beatPulse * 12;
-  ctx.beginPath();
-  ctx.moveTo(judgX, hwyY);
-  ctx.lineTo(judgX, hwyY + hwyH);
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-
-  // "NOW" label
-  ctx.font = '700 9px Inter, sans-serif';
-  ctx.fillStyle = '#555';
-  ctx.textAlign = 'center';
-  ctx.fillText('NOW', judgX, hwyY + hwyH + 14);
-
-  // Lane labels
-  ctx.font = '700 10px Inter, sans-serif';
-  ctx.textAlign = 'right';
-  const laneH = hwyH / 4;
-  for (let i = 1; i <= 4; i++) {
-    const ly = hwyY + (i - 1) * laneH + laneH / 2;
-    ctx.fillStyle = MOVE_COLORS[i] + '66';
-    ctx.fillText(MOVE_ARROWS[i], hwyX - 4, ly + 4);
-  }
-
-  // Progress bar under highway
-  const progY = hwyY + hwyH + 20;
-  const progW = hwyW;
-  ctx.fillStyle = 'rgba(255,255,255,0.03)';
-  roundRect(ctx, hwyX, progY, progW, 3, 2);
-  ctx.fill();
-  const progColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
-  ctx.fillStyle = progColor;
-  roundRect(ctx, hwyX, progY, progW * state.barProgress, 3, 2);
-  ctx.fill();
 
   // Input hint
-  const isCaller = state.myId === state.callerId;
   if (
     (state.phase === PHASE.RESPONDING && !isCaller) ||
     ((state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) && isCaller)
@@ -775,126 +759,150 @@ function drawHighway(time) {
   }
 }
 
-function drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, pattern, isCallerPhase, playerInputs = null) {
-  const elapsed = Date.now() - state.barStartTime;
-  const pixPerMs = (hwyW - 80) / state.barDurationMs;
-  const laneH = hwyH / 4;
-  const noteSize = 24;
+function drawSlotGrid(laneX, laneY, laneW, laneH, slotW) {
+  const beatDuration = state.barDurationMs / BEATS_PER_BAR;
 
-  // Lane row backgrounds
-  for (let i = 0; i < 4; i++) {
-    const ly = hwyY + i * laneH;
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'rgba(255,255,255,0.008)';
-    ctx.fillRect(hwyX, ly, hwyW, laneH);
-  }
+  for (let i = 0; i < SUBDIVISIONS; i++) {
+    const sx = laneX + i * slotW;
+    const isDownbeat = i % 2 === 0;
 
-  // Draw pattern notes — scrolling right to left
-  for (const beat of pattern) {
-    const screenX = judgX + (beat.time - elapsed) * pixPerMs;
-    if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
+    // Slot background
+    ctx.fillStyle = isDownbeat ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.012)';
+    ctx.fillRect(sx, laneY, slotW - 1, laneH);
 
-    const lane = beat.move - 1; // 0-3
-    const ly = hwyY + lane * laneH + laneH / 2;
-    const color = MOVE_COLORS[beat.move];
-
-    // Note diamond/arrow
-    drawNote(screenX, ly, noteSize, color, beat.move, 1.0);
-  }
-
-  // Draw player inputs (during responding phase)
-  if (playerInputs) {
-    for (const beat of playerInputs) {
-      const screenX = judgX + (beat.time - elapsed) * pixPerMs;
-      if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
-
-      const lane = beat.move - 1;
-      const ly = hwyY + lane * laneH + laneH / 2;
-
-      // Check accuracy
-      const rating = getTimingRating(beat.time, beat.move, state.lockedPattern);
-      const ratingColor = rating === 'PERFECT' ? '#FFE600' :
-                          rating === 'GREAT' ? '#00FF87' :
-                          rating === 'GOOD' ? '#00D4FF' : '#FF3366';
-
-      drawNote(screenX, ly, noteSize * 0.8, ratingColor, beat.move, 0.8);
+    // Beat number at top for downbeats
+    if (i % 2 === 0) {
+      ctx.font = '700 9px Inter, sans-serif';
+      ctx.fillStyle = '#333';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(i / 2 + 1), sx + slotW / 2, laneY - 4);
     }
   }
-}
 
-function drawGhostPattern(hwyX, hwyY, hwyW, hwyH, judgX, pattern) {
-  const elapsed = Date.now() - state.barStartTime;
-  const pixPerMs = (hwyW - 80) / state.barDurationMs;
-  const laneH = hwyH / 4;
-  const noteSize = 20;
-
-  ctx.globalAlpha = 0.2;
-  for (const beat of pattern) {
-    const screenX = judgX + (beat.time - elapsed) * pixPerMs;
-    if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
-
-    const lane = beat.move - 1;
-    const ly = hwyY + lane * laneH + laneH / 2;
-    const color = MOVE_COLORS[beat.move];
-
-    drawNote(screenX, ly, noteSize, color, beat.move, 1.0);
+  // Vertical grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= SUBDIVISIONS; i++) {
+    const x = laneX + i * slotW;
+    const isBeat = i % 2 === 0;
+    ctx.strokeStyle = isBeat ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)';
+    ctx.beginPath();
+    ctx.moveTo(x, laneY);
+    ctx.lineTo(x, laneY + laneH);
+    ctx.stroke();
   }
-  ctx.globalAlpha = 1;
 }
 
-function drawNote(x, y, size, color, move, alpha) {
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 6;
+function drawCallingTimeline(laneX, laneY, laneW, laneH, slotW) {
+  const isBar2 = state.phase === PHASE.CALLING_BAR2;
+  const currentPattern = isBar2 ? state.bar2Pattern : state.bar1Pattern;
 
-  // Diamond shape
-  const half = size / 2;
-  ctx.beginPath();
-  ctx.moveTo(x, y - half);
-  ctx.lineTo(x + half, y);
-  ctx.lineTo(x, y + half);
-  ctx.lineTo(x - half, y);
-  ctx.closePath();
-  ctx.fill();
-
-  // Arrow inside
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#000';
-  ctx.font = `900 ${size * 0.45}px Inter, sans-serif`;
+  // Label
+  ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(MOVE_ARROWS[move], x, y + 1);
+  ctx.fillStyle = '#FF6B35';
+  const label = isBar2 ? 'BAR 2 — REPEAT TO LOCK' : 'BAR 1 — FREESTYLE';
+  ctx.fillText(label, laneX + laneW / 2, laneY + laneH + 16);
 
-  ctx.textBaseline = 'alphabetic';
-  ctx.globalAlpha = 1;
-}
-
-function drawResultsLane(hwyX, hwyY, hwyW, hwyH, judgX) {
-  const laneH = hwyH / 4;
-  // Lane backgrounds
-  for (let i = 0; i < 4; i++) {
-    const ly = hwyY + i * laneH;
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'rgba(255,255,255,0.008)';
-    ctx.fillRect(hwyX, ly, hwyW, laneH);
+  // Ghost of bar1 during bar2
+  if (isBar2) {
+    ctx.globalAlpha = 0.15;
+    for (const beat of state.bar1Pattern) {
+      const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
+      const noteH = laneH - 10;
+      drawTimelineNote(sx, laneY + 5, slotW - 4, noteH, beat.move);
+    }
+    ctx.globalAlpha = 1;
   }
 
-  // Show locked pattern statically across the highway
-  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+  // Current pattern notes
+  for (const beat of currentPattern) {
+    const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
+    const noteH = laneH - 10;
+    drawTimelineNote(sx, laneY + 5, slotW - 4, noteH, beat.move);
+  }
+
+  // Match indicator during bar 2
+  if (isBar2 && state.bar1Pattern.length > 0) {
+    let matchCount = 0;
+    const used = new Set();
+    for (const b1 of state.bar1Pattern) {
+      for (let i = 0; i < state.bar2Pattern.length; i++) {
+        if (used.has(i)) continue;
+        if (state.bar2Pattern[i].move === b1.move &&
+            Math.abs(snapToGrid(state.bar2Pattern[i].time) - snapToGrid(b1.time)) < state.barDurationMs / SUBDIVISIONS * 0.6) {
+          matchCount++;
+          used.add(i);
+          break;
+        }
+      }
+    }
+    const pct = Math.round(matchCount / state.bar1Pattern.length * 100);
+    ctx.font = '700 11px Inter, sans-serif';
+    ctx.fillStyle = pct === 100 ? '#00FF87' : '#FF6B35';
+    ctx.textAlign = 'right';
+    ctx.fillText(`MATCH: ${pct}%`, laneX + laneW, laneY + laneH + 16);
+  }
+}
+
+function drawRespondingTimeline(laneX, laneY, laneW, laneH, slotW) {
+  const halfH = laneH / 2 - 4;
+
+  // Top half: locked pattern
+  ctx.font = '900 10px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = '#FFE600';
+  ctx.textAlign = 'left';
+  ctx.fillText('PATTERN', laneX - 12, laneY + halfH / 2 + 4);
+
   for (const beat of state.lockedPattern) {
-    const screenX = judgX + beat.time * pixPerMs * 0.8;
-    if (screenX < hwyX || screenX > hwyX + hwyW) continue;
-    const lane = beat.move - 1;
-    const ly = hwyY + lane * laneH + laneH / 2;
-    drawNote(screenX, ly, 22, MOVE_COLORS[beat.move], beat.move, 0.5);
+    const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
+    drawTimelineNote(sx, laneY + 2, slotW - 4, halfH, beat.move);
+  }
+
+  // Divider
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(laneX, laneY + halfH + 4);
+  ctx.lineTo(laneX + laneW, laneY + halfH + 4);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Bottom half: my inputs
+  ctx.font = '900 10px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = '#00FF87';
+  ctx.textAlign = 'left';
+  ctx.fillText('YOU', laneX - 12, laneY + halfH + 8 + halfH / 2 + 4);
+
+  for (const beat of state.myInputs) {
+    const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
+    const rating = getTimingRating(beat.time, beat.move, state.lockedPattern);
+    const ratingColor = rating === 'PERFECT' ? '#FFE600' :
+                        rating === 'GREAT' ? '#00FF87' :
+                        rating === 'GOOD' ? '#00D4FF' : '#FF3366';
+    drawTimelineNote(sx, laneY + halfH + 8, slotW - 4, halfH, beat.move, ratingColor);
+  }
+
+  // Label
+  ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = '#00FF87';
+  ctx.textAlign = 'center';
+  ctx.fillText('YOUR TURN — MATCH THE PATTERN', laneX + laneW / 2, laneY + laneH + 16);
+}
+
+function drawResultsTimeline(laneX, laneY, laneW, laneH, slotW) {
+  // Show locked pattern across full height
+  for (const beat of state.lockedPattern) {
+    const sx = timeToX(snapToGrid(beat.time), laneX, laneW);
+    drawTimelineNote(sx, laneY + 5, slotW - 4, laneH - 10, beat.move, null, 0.4);
   }
 
   // Results text
-  ctx.font = '900 20px "Bebas Neue", Inter, sans-serif';
+  ctx.font = '900 22px "Bebas Neue", Inter, sans-serif';
   ctx.fillStyle = '#B24BF3';
   ctx.textAlign = 'center';
-  ctx.fillText(state.resultMessage, hwyX + hwyW / 2, hwyY + hwyH / 2 - 10);
+  ctx.fillText(state.resultMessage, laneX + laneW / 2, laneY + laneH / 2 - 10);
 
-  // Score breakdown
   if (state.lastResults) {
     const r = state.lastResults;
     ctx.font = '700 12px Inter, sans-serif';
@@ -904,8 +912,40 @@ function drawResultsLane(hwyX, hwyY, hwyW, hwyH, judgX) {
     if (r.goodCount > 0) parts.push(`GOOD: ${r.goodCount}`);
     if (r.missCount > 0) parts.push(`MISS: ${r.missCount}`);
     ctx.fillStyle = '#777';
-    ctx.fillText(parts.join('  •  '), hwyX + hwyW / 2, hwyY + hwyH / 2 + 14);
+    ctx.fillText(parts.join('  •  '), laneX + laneW / 2, laneY + laneH / 2 + 14);
   }
+}
+
+function drawTimelineNote(x, y, w, h, move, overrideColor = null, alpha = 1.0) {
+  const color = overrideColor || MOVE_COLORS[move];
+  ctx.globalAlpha = alpha;
+
+  // Filled box with rounded corners
+  ctx.fillStyle = color + '30';
+  roundRect(ctx, x, y, w, h, 5);
+  ctx.fill();
+
+  // Border
+  ctx.strokeStyle = color + '88';
+  ctx.lineWidth = 1.5;
+  roundRect(ctx, x, y, w, h, 5);
+  ctx.stroke();
+
+  // Glow
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 4;
+
+  // Arrow
+  const fontSize = Math.min(w * 0.5, h * 0.4, 28);
+  ctx.fillStyle = color;
+  ctx.font = `900 ${fontSize}px Inter, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(MOVE_ARROWS[move], x + w / 2, y + h / 2);
+
+  ctx.shadowBlur = 0;
+  ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha = 1;
 }
 
 function drawHitFeedback() {
