@@ -79,7 +79,10 @@
   </div>
 
   <script>
-    window.GAME_SERVER_URL = '';
+    // Auto-detect: use Railway backend when served from Cloudflare Pages, otherwise local
+    window.GAME_SERVER_URL = window.location.hostname.includes('pages.dev')
+      ? 'wss://babel-tower-production.up.railway.app'
+      : '';
   </script>
   <script src="https://unpkg.com/colyseus.js@0.15.24/dist/colyseus.js"></script>
   <script type="module" src="main.js"></script>
