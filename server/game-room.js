@@ -3,15 +3,18 @@
  *
  * Manages: roles, beat timing, pattern recording/matching,
  * elimination, round progression, BPM escalation.
+ *
+ * Patterns are stored as arrays of { time, move } where time is
+ * ms offset from bar start. Matching uses timing windows, not slots.
  */
 
 import colyseus from 'colyseus';
 const { Room } = colyseus;
-import { Schema, MapSchema, ArraySchema, defineTypes } from '@colyseus/schema';
+import { Schema, MapSchema, defineTypes } from '@colyseus/schema';
 import {
   MAX_PLAYERS, STARTING_BPM, BPM_INCREMENT, MAX_BPM,
-  BEATS_PER_BAR, SUBDIVISIONS, MIN_PLAYERS_TO_START,
-  COUNTDOWN_SECONDS, RESULTS_DURATION_MS, PHASE, NEON_COLORS,
+  BEATS_PER_BAR, MIN_PLAYERS_TO_START,
+  COUNTDOWN_SECONDS, RESULTS_DURATION_MS, PHASE, NEON_COLORS, TIMING,
 } from '../shared/constants.js';
 
 // ─── Schema ─────────────────────────────────────────────────────────
@@ -56,11 +59,11 @@ export class GameRoom extends Room {
 
     this.colorCounter = 0;
 
-    // Pattern storage (not in schema — sent via messages)
-    this.callerBar1 = new Array(SUBDIVISIONS).fill(0);
-    this.callerBar2 = new Array(SUBDIVISIONS).fill(0);
-    this.lockedPattern = new Array(SUBDIVISIONS).fill(0);
-    this.responderInputs = new Map(); // sessionId → number[]
+    // Pattern storage — arrays of { time: number (ms offset), move: number }
+    this.callerBar1 = [];
+    this.callerBar2 = [];
+    this.lockedPattern = [];
+    this.responderInputs = new Map(); // sessionId → [{ time, move }]
     this.phaseTimer = null;
 
     // ─── Message Handlers ───────────────────────────────────────
@@ -69,13 +72,17 @@ export class GameRoom extends Room {
       if (client.sessionId !== this.state.callerId) return;
       if (this.state.phase !== PHASE.CALLING_BAR1 && this.state.phase !== PHASE.CALLING_BAR2) return;
 
-      const { slot, move } = data;
-      if (slot < 0 || slot >= SUBDIVISIONS || move < 1 || move > 4) return;
+      const { time, move } = data;
+      if (typeof time !== 'number' || move < 1 || move > 4) return;
+      // Clamp time to bar duration
+      const t = Math.max(0, Math.min(time, this.state.barDurationMs));
+
+      const beat = { time: t, move };
 
       if (this.state.phase === PHASE.CALLING_BAR1) {
-        this.callerBar1[slot] = move;
+        this.callerBar1.push(beat);
       } else {
-        this.callerBar2[slot] = move;
+        this.callerBar2.push(beat);
       }
 
       // Update caller pose for rendering
@@ -85,7 +92,7 @@ export class GameRoom extends Room {
       // Broadcast to everyone so they see the input in real-time
       this.broadcast('inputEvent', {
         phase: this.state.phase,
-        slot,
+        time: t,
         move,
         sessionId: client.sessionId,
       });
@@ -96,13 +103,14 @@ export class GameRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.role !== 'responder' || !player.alive) return;
 
-      const { slot, move } = data;
-      if (slot < 0 || slot >= SUBDIVISIONS || move < 1 || move > 4) return;
+      const { time, move } = data;
+      if (typeof time !== 'number' || move < 1 || move > 4) return;
+      const t = Math.max(0, Math.min(time, this.state.barDurationMs));
 
       if (!this.responderInputs.has(client.sessionId)) {
-        this.responderInputs.set(client.sessionId, new Array(SUBDIVISIONS).fill(0));
+        this.responderInputs.set(client.sessionId, []);
       }
-      this.responderInputs.get(client.sessionId)[slot] = move;
+      this.responderInputs.get(client.sessionId).push({ time: t, move });
 
       // Update pose
       player.currentMove = move;
@@ -110,16 +118,14 @@ export class GameRoom extends Room {
       // Broadcast so others see the responder's move
       this.broadcast('inputEvent', {
         phase: this.state.phase,
-        slot,
+        time: t,
         move,
         sessionId: client.sessionId,
       });
     });
 
     this.onMessage('requestStart', (client) => {
-      console.log(`[GameRoom] requestStart from ${client.sessionId}, phase=${this.state.phase}, alive=${this.getAlivePlayers().length}, min=${MIN_PLAYERS_TO_START}`);
       if (this.state.phase === PHASE.LOBBY && this.getAlivePlayers().length >= MIN_PLAYERS_TO_START) {
-        console.log('[GameRoom] Starting game!');
         this.startGame();
       }
     });
@@ -144,7 +150,6 @@ export class GameRoom extends Room {
 
     console.log(`[GameRoom] Player joined: ${client.sessionId} (${color})`);
 
-    // If we're in lobby and have enough players, notify
     if (this.state.phase === PHASE.LOBBY && this.state.players.size >= MIN_PLAYERS_TO_START) {
       this.broadcast('canStart', { count: this.state.players.size });
     }
@@ -158,13 +163,11 @@ export class GameRoom extends Room {
 
     console.log(`[GameRoom] Player left: ${client.sessionId}`);
 
-    // If the caller left mid-game, pick a new one or end round
     if (client.sessionId === this.state.callerId && this.state.phase !== PHASE.LOBBY) {
       this.clearTimer();
       this.showResults('Caller disconnected!');
     }
 
-    // If not enough players, go back to lobby
     if (this.state.players.size < MIN_PLAYERS_TO_START && this.state.phase !== PHASE.LOBBY) {
       this.clearTimer();
       this.state.phase = PHASE.LOBBY;
@@ -179,7 +182,6 @@ export class GameRoom extends Room {
   startGame() {
     this.state.round = 0;
     this.state.bpm = STARTING_BPM;
-    // Reset all players
     this.state.players.forEach((p) => { p.alive = true; p.score = 0; });
     this.pickCaller();
     this.startCountdown();
@@ -188,12 +190,9 @@ export class GameRoom extends Room {
   pickCaller() {
     const alive = this.getAlivePlayers();
     if (alive.length === 0) return;
-
-    // First round: random. After: last survivor or random alive
     const pick = alive[Math.floor(Math.random() * alive.length)];
     this.state.callerId = pick.sessionId;
 
-    // Set roles
     this.state.players.forEach((player, sessionId) => {
       player.role = sessionId === this.state.callerId ? 'caller' : 'responder';
       player.currentMove = 0;
@@ -206,12 +205,11 @@ export class GameRoom extends Room {
     this.state.countdown = COUNTDOWN_SECONDS;
 
     // Reset patterns
-    this.callerBar1.fill(0);
-    this.callerBar2.fill(0);
-    this.lockedPattern.fill(0);
+    this.callerBar1 = [];
+    this.callerBar2 = [];
+    this.lockedPattern = [];
     this.responderInputs.clear();
 
-    // Reset all alive players
     this.state.players.forEach(p => { p.currentMove = 0; });
 
     this.broadcast('phaseChange', {
@@ -227,20 +225,42 @@ export class GameRoom extends Room {
       this.state.countdown = count;
       if (count <= 0) {
         this.clearTimer();
-        this.startCallingBar1();
+        this.startCountIn();
       }
     }, 1000);
   }
 
+  startCountIn() {
+    // "1, 2, 3, GO!" at the current BPM — one beat each
+    const beatMs = 60000 / this.state.bpm;
+    const totalBeats = 4; // 1, 2, 3, GO
+    this.state.phase = PHASE.COUNTIN;
+    this.state.countdown = totalBeats;
+
+    this.broadcast('phaseChange', {
+      phase: PHASE.COUNTIN,
+      bpm: this.state.bpm,
+      beatMs,
+      totalBeats,
+    });
+
+    let beat = 0;
+    this.phaseTimer = setInterval(() => {
+      beat++;
+      this.state.countdown = totalBeats - beat;
+      if (beat >= totalBeats) {
+        this.clearTimer();
+        this.startCallingBar1();
+      }
+    }, beatMs);
+  }
+
   getBarDurationMs() {
-    // Duration of one bar in ms
-    // BPM = beats per minute. beats per bar = BEATS_PER_BAR
-    // bar duration = (BEATS_PER_BAR / BPM) * 60000
     return (BEATS_PER_BAR / this.state.bpm) * 60000;
   }
 
   startCallingBar1() {
-    this.callerBar1.fill(0);
+    this.callerBar1 = [];
     const duration = this.getBarDurationMs();
     this.state.phase = PHASE.CALLING_BAR1;
     this.state.barStartTime = Date.now();
@@ -254,11 +274,11 @@ export class GameRoom extends Room {
 
     this.phaseTimer = setTimeout(() => {
       this.startCallingBar2();
-    }, duration);
+    }, duration + 200); // small grace period
   }
 
   startCallingBar2() {
-    this.callerBar2.fill(0);
+    this.callerBar2 = [];
     const duration = this.getBarDurationMs();
     this.state.phase = PHASE.CALLING_BAR2;
     this.state.barStartTime = Date.now();
@@ -268,42 +288,62 @@ export class GameRoom extends Room {
       phase: PHASE.CALLING_BAR2,
       barDurationMs: duration,
       bpm: this.state.bpm,
-      bar1Pattern: this.callerBar1, // send bar1 for comparison display
+      bar1Pattern: this.callerBar1, // send bar1 for display
     });
 
     this.phaseTimer = setTimeout(() => {
       this.checkCallerMatch();
-    }, duration);
+    }, duration + 200);
   }
 
   checkCallerMatch() {
-    // Compare bar1 and bar2
-    let match = true;
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      if (this.callerBar1[i] !== this.callerBar2[i]) {
-        match = false;
-        break;
-      }
+    // Pattern must not be empty
+    if (this.callerBar1.length === 0) {
+      this.broadcast('callerFailed', { reason: 'Empty pattern!' });
+      setTimeout(() => this.startCountIn(), 1000);
+      return;
     }
 
-    // Also check that the pattern isn't empty
-    const hasContent = this.callerBar1.some(m => m !== 0);
+    // Compare bar1 and bar2 using timing windows
+    // Each beat in bar1 must have a matching beat in bar2 (same move, within GOOD window)
+    // and vice versa
+    const matched = this.patternsMatch(this.callerBar1, this.callerBar2);
 
-    if (match && hasContent) {
-      // Pattern locked!
+    if (matched) {
+      // Pattern locked — use bar1 as the canonical pattern
       this.lockedPattern = [...this.callerBar1];
       this.broadcast('patternLocked', { pattern: this.lockedPattern });
       this.startResponding();
     } else {
-      // Caller failed to match — try again from bar 1
       this.broadcast('callerFailed', {
-        bar1: this.callerBar1,
-        bar2: this.callerBar2,
-        reason: !hasContent ? 'Empty pattern!' : 'Bars didn\'t match!',
+        reason: "Bars didn't match!",
       });
-      // Give them another shot
-      setTimeout(() => this.startCallingBar1(), 1000);
+      setTimeout(() => this.startCountIn(), 1000);
     }
+  }
+
+  patternsMatch(pattern1, pattern2) {
+    if (pattern1.length !== pattern2.length) return false;
+
+    // Sort both by time
+    const p1 = [...pattern1].sort((a, b) => a.time - b.time);
+    const p2 = [...pattern2].sort((a, b) => a.time - b.time);
+
+    // Each beat in p1 must match a beat in p2 (same move, time within GOOD window)
+    const used = new Set();
+    for (const beat of p1) {
+      let found = false;
+      for (let i = 0; i < p2.length; i++) {
+        if (used.has(i)) continue;
+        if (p2[i].move === beat.move && Math.abs(p2[i].time - beat.time) <= TIMING.GOOD) {
+          used.add(i);
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
   }
 
   startResponding() {
@@ -322,7 +362,7 @@ export class GameRoom extends Room {
 
     this.phaseTimer = setTimeout(() => {
       this.judgeResponders();
-    }, duration);
+    }, duration + 200);
   }
 
   judgeResponders() {
@@ -332,36 +372,76 @@ export class GameRoom extends Room {
     this.state.players.forEach((player, sessionId) => {
       if (player.role !== 'responder' || !player.alive) return;
 
-      const inputs = this.responderInputs.get(sessionId) || new Array(SUBDIVISIONS).fill(0);
-      let correct = 0;
-      let total = 0;
+      const inputs = this.responderInputs.get(sessionId) || [];
+      const { score, perfectCount, greatCount, goodCount, missCount } = this.scorePattern(this.lockedPattern, inputs);
 
-      for (let i = 0; i < SUBDIVISIONS; i++) {
-        if (this.lockedPattern[i] !== 0) {
-          total++;
-          if (inputs[i] === this.lockedPattern[i]) correct++;
-        }
-      }
+      // Must hit at least half the beats with GOOD or better to survive
+      const totalBeats = this.lockedPattern.length;
+      const hitsNeeded = Math.ceil(totalBeats * 0.6);
+      const hits = perfectCount + greatCount + goodCount;
+      const survived = hits >= hitsNeeded;
 
-      // Must match ALL moves to survive
-      const survived = total > 0 && correct === total;
       if (!survived) {
         player.alive = false;
       } else {
-        player.score += this.state.round;
+        player.score += score;
       }
 
       results.push({
         sessionId,
         survived,
-        correct,
-        total,
-        inputs,
+        score,
+        perfectCount,
+        greatCount,
+        goodCount,
+        missCount,
+        totalBeats,
       });
     });
 
     this.state.alivePlayers = this.getAlivePlayers().length;
     this.showResults('Round complete!', results);
+  }
+
+  scorePattern(target, inputs) {
+    let perfectCount = 0, greatCount = 0, goodCount = 0, missCount = 0;
+    let score = 0;
+
+    const usedInputs = new Set();
+    const sortedTarget = [...target].sort((a, b) => a.time - b.time);
+
+    for (const beat of sortedTarget) {
+      let bestDelta = Infinity;
+      let bestIdx = -1;
+
+      for (let i = 0; i < inputs.length; i++) {
+        if (usedInputs.has(i)) continue;
+        if (inputs[i].move !== beat.move) continue;
+        const delta = Math.abs(inputs[i].time - beat.time);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx !== -1 && bestDelta <= TIMING.GOOD) {
+        usedInputs.add(bestIdx);
+        if (bestDelta <= TIMING.PERFECT) {
+          perfectCount++;
+          score += 3;
+        } else if (bestDelta <= TIMING.GREAT) {
+          greatCount++;
+          score += 2;
+        } else {
+          goodCount++;
+          score += 1;
+        }
+      } else {
+        missCount++;
+      }
+    }
+
+    return { score, perfectCount, greatCount, goodCount, missCount };
   }
 
   showResults(message, results = []) {
@@ -383,7 +463,6 @@ export class GameRoom extends Room {
     const alive = this.getAlivePlayers();
 
     if (alive.length <= 1) {
-      // Game over!
       this.state.phase = PHASE.GAME_OVER;
       const winner = alive.length === 1 ? alive[0] : null;
 
@@ -392,21 +471,16 @@ export class GameRoom extends Room {
         winnerColor: winner ? this.state.players.get(winner.sessionId).color : null,
       });
 
-      // After a pause, restart
       this.phaseTimer = setTimeout(() => {
         this.state.phase = PHASE.LOBBY;
         this.state.bpm = STARTING_BPM;
         this.state.round = 0;
-        // Reset all players
         this.state.players.forEach(p => { p.alive = true; p.score = 0; p.role = 'responder'; });
         this.state.alivePlayers = this.state.players.size;
         this.broadcast('phaseChange', { phase: PHASE.LOBBY });
       }, 5000);
     } else {
-      // Escalate BPM
       this.state.bpm = Math.min(this.state.bpm + BPM_INCREMENT, MAX_BPM);
-      // Caller stays the same unless they want to rotate
-      // (For now, pick a new caller from alive players)
       this.pickCaller();
       this.startCountdown();
     }

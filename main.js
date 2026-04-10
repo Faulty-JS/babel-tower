@@ -1,13 +1,13 @@
 /**
  * BRING IT — Rhythm Party Game Client
  *
- * Canvas 2D renderer, beat system, input handling, Colyseus networking.
+ * Scrolling highway beat system, continuous timing, Web Audio.
  * First mode: Workout Class (P90X style)
  */
 
 import {
   MOVE, MOVE_KEYS, MOVE_NAMES, PHASE, SUBDIVISIONS,
-  BEATS_PER_BAR, NEON_COLORS, STARTING_BPM,
+  BEATS_PER_BAR, NEON_COLORS, STARTING_BPM, TIMING,
 } from './shared/constants.js';
 
 import {
@@ -36,12 +36,11 @@ const state = {
   barDurationMs: 2400,
   barProgress: 0,
 
-  // Pattern data
-  bar1Pattern: new Array(SUBDIVISIONS).fill(0),
-  bar2Pattern: new Array(SUBDIVISIONS).fill(0),
-  lockedPattern: new Array(SUBDIVISIONS).fill(0),
-  myInputs: new Array(SUBDIVISIONS).fill(0),
-  lastInputSlot: -1,
+  // Pattern data — arrays of { time (ms offset), move (1-4) }
+  bar1Pattern: [],
+  bar2Pattern: [],
+  lockedPattern: [],
+  myInputs: [],
 
   // Players
   players: new Map(),
@@ -54,6 +53,9 @@ const state = {
   callerFailed: false,
   gameOverWinner: null,
 
+  // Results detail
+  lastResults: null,
+
   // FX
   beatPulse: 0,
   screenShake: 0,
@@ -61,9 +63,12 @@ const state = {
   flashColor: '#fff',
   particles: [],
   lastCountdown: -1,
-
-  // Metronome tracking
   lastBeatIndex: -1,
+  countInBeatMs: 600,
+  countInStart: 0,
+
+  // Hit feedback — brief flashes on the judgment line
+  hitFeedback: [], // { time, rating, color, alpha }
 };
 
 // ─── Canvas Setup ───────────────────────────────────────────────────
@@ -90,7 +95,6 @@ async function connect() {
     state.myId = state.room.sessionId;
     console.log('[Net] Joined as', state.myId);
     setupRoomListeners();
-    // Ensure lobby updates after first state sync
     setTimeout(() => updateLobbyCount(), 500);
   } catch (e) {
     console.error('[Net] Failed to connect:', e);
@@ -107,8 +111,7 @@ function setupRoomListeners() {
   room.state.listen('callerId', (val) => { state.callerId = val; });
   room.state.listen('countdown', (val) => {
     state.countdown = val;
-    // Play countdown beep when countdown changes
-    if (val !== state.lastCountdown && state.phase === PHASE.COUNTDOWN) {
+    if (val !== state.lastCountdown && (state.phase === PHASE.COUNTDOWN || state.phase === PHASE.COUNTIN)) {
       playCountdownBeep(val);
       state.lastCountdown = val;
     }
@@ -143,6 +146,8 @@ function setupRoomListeners() {
     state.callerFailed = false;
     state.gameOverWinner = null;
     state.lastBeatIndex = -1;
+    state.lastResults = null;
+    state.hitFeedback = [];
 
     if (data.barDurationMs) {
       state.barDurationMs = data.barDurationMs;
@@ -151,16 +156,25 @@ function setupRoomListeners() {
     if (data.bar1Pattern) state.bar1Pattern = [...data.bar1Pattern];
     if (data.pattern) state.lockedPattern = [...data.pattern];
 
+    if (data.phase === PHASE.COUNTIN) {
+      stopMetronome();
+      state.lastCountdown = -1;
+      // Count-in uses its own beat-synced beeps via countdown listener
+      if (data.beatMs) state.countInBeatMs = data.beatMs;
+      state.countInStart = Date.now();
+    }
     if (data.phase === PHASE.CALLING_BAR1 || data.phase === PHASE.CALLING_BAR2) {
-      if (state.myId === state.callerId) {
-        state.myInputs.fill(0);
-        state.lastInputSlot = -1;
+      state.myInputs = [];
+      if (data.phase === PHASE.CALLING_BAR1) {
+        state.bar1Pattern = [];
+        state.bar2Pattern = [];
+      } else {
+        state.bar2Pattern = [];
       }
       startMetronome(state.bpm, BEATS_PER_BAR);
     }
     if (data.phase === PHASE.RESPONDING) {
-      state.myInputs.fill(0);
-      state.lastInputSlot = -1;
+      state.myInputs = [];
       startMetronome(state.bpm, BEATS_PER_BAR);
     }
     if (data.phase === PHASE.COUNTDOWN) {
@@ -178,15 +192,13 @@ function setupRoomListeners() {
     }
   });
 
-  room.onMessage('canStart', () => {
-    updateLobbyCount();
-  });
+  room.onMessage('canStart', () => { updateLobbyCount(); });
 
   room.onMessage('inputEvent', (data) => {
     if (data.phase === PHASE.CALLING_BAR1) {
-      state.bar1Pattern[data.slot] = data.move;
+      state.bar1Pattern.push({ time: data.time, move: data.move });
     } else if (data.phase === PHASE.CALLING_BAR2) {
-      state.bar2Pattern[data.slot] = data.move;
+      state.bar2Pattern.push({ time: data.time, move: data.move });
     }
   });
 
@@ -201,14 +213,15 @@ function setupRoomListeners() {
     state.callerFailed = true;
     flashMessage(data.reason, '#FF3366');
     triggerFlash('#FF3366', 0.25);
-    state.bar1Pattern.fill(0);
-    state.bar2Pattern.fill(0);
+    state.bar1Pattern = [];
+    state.bar2Pattern = [];
     playCallerFailed();
     stopMetronome();
   });
 
   room.onMessage('roundResults', (data) => {
     const myResult = data.results.find(r => r.sessionId === state.myId);
+    state.lastResults = myResult || null;
     if (myResult) {
       if (myResult.survived) {
         flashMessage('SURVIVED!', '#00FF87');
@@ -244,7 +257,6 @@ function setupRoomListeners() {
 // ─── Input ──────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', (e) => {
-  // Toggle mute with M
   if (e.key === 'm' || e.key === 'M') {
     setMuted(!isMuted());
     flashMessage(isMuted() ? 'MUTED' : 'UNMUTED', '#666');
@@ -254,34 +266,64 @@ document.addEventListener('keydown', (e) => {
   const move = MOVE_KEYS[e.key];
   if (!move || !state.room) return;
   e.preventDefault();
-
-  // Init audio on first input gesture
   initAudio();
 
   const isCaller = state.myId === state.callerId;
   const myPlayer = state.players.get(state.myId);
 
-  const elapsed = Date.now() - state.barStartTime;
-  const slotDuration = state.barDurationMs / SUBDIVISIONS;
-  const slot = Math.min(Math.floor(elapsed / slotDuration), SUBDIVISIONS - 1);
-
-  if (slot === state.lastInputSlot) return;
-  state.lastInputSlot = slot;
+  // Continuous time — ms elapsed since bar start
+  const timeInBar = Date.now() - state.barStartTime;
 
   if (isCaller && (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2)) {
-    state.myInputs[slot] = move;
-    state.room.send('callerInput', { slot, move });
+    const beat = { time: timeInBar, move };
+    state.myInputs.push(beat);
+    state.room.send('callerInput', beat);
     playInputSound(move);
+    addHitFeedback('INPUT', MOVE_COLORS[move]);
   } else if (!isCaller && state.phase === PHASE.RESPONDING && myPlayer && myPlayer.alive) {
-    state.myInputs[slot] = move;
-    state.room.send('responderInput', { slot, move });
+    const beat = { time: timeInBar, move };
+    state.myInputs.push(beat);
+    state.room.send('responderInput', beat);
     playInputSound(move);
+
+    // Check timing against locked pattern — find closest matching beat
+    const rating = getTimingRating(timeInBar, move, state.lockedPattern);
+    addHitFeedback(rating, MOVE_COLORS[move]);
   }
 
   state.beatPulse = 1.0;
 });
 
-// Also init audio on start button click
+function getTimingRating(time, move, pattern) {
+  let bestDelta = Infinity;
+  for (const beat of pattern) {
+    if (beat.move === move) {
+      const delta = Math.abs(beat.time - time);
+      if (delta < bestDelta) bestDelta = delta;
+    }
+  }
+  if (bestDelta <= TIMING.PERFECT) return 'PERFECT';
+  if (bestDelta <= TIMING.GREAT) return 'GREAT';
+  if (bestDelta <= TIMING.GOOD) return 'GOOD';
+  return 'MISS';
+}
+
+function addHitFeedback(rating, color) {
+  const ratingColors = {
+    'PERFECT': '#FFE600',
+    'GREAT': '#00FF87',
+    'GOOD': '#00D4FF',
+    'MISS': '#FF3366',
+    'INPUT': '#FF6B35',
+  };
+  state.hitFeedback.push({
+    rating,
+    color: ratingColors[rating] || color,
+    alpha: 1.0,
+    y: 0,
+  });
+}
+
 document.addEventListener('click', () => { initAudio(); });
 
 // ─── Lobby UI ───────────────────────────────────────────────────────
@@ -342,19 +384,16 @@ function updateParticles() {
     const p = state.particles[i];
     p.x += p.vx;
     p.y += p.vy;
-    p.vy += 0.1; // gravity
+    p.vy += 0.1;
     p.vx *= 0.98;
     p.life--;
-    if (p.life <= 0) {
-      state.particles.splice(i, 1);
-    }
+    if (p.life <= 0) state.particles.splice(i, 1);
   }
 }
 
 function drawParticles() {
   for (const p of state.particles) {
-    const alpha = Math.min(1, p.life / 30);
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = Math.min(1, p.life / 30);
     ctx.fillStyle = p.color;
     ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
   }
@@ -365,9 +404,9 @@ function drawParticles() {
 
 const MOVE_ARROWS = ['', '▲', '▼', '◄', '►'];
 const MOVE_COLORS = ['', '#00D4FF', '#FF1493', '#FFE600', '#00FF87'];
+const MOVE_LABELS = ['', 'UP', 'DOWN', 'LEFT', 'RIGHT'];
 
 function drawFrame(time) {
-  // Screen shake offset
   let shakeX = 0, shakeY = 0;
   if (state.screenShake > 0) {
     shakeX = (Math.random() - 0.5) * state.screenShake * 2;
@@ -388,17 +427,14 @@ function drawFrame(time) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
-  // Ambient grid (subtle)
   drawGrid(time);
 
-  // Floor
-  const floorY = H * 0.62;
+  const floorY = H * 0.55;
   const floorGrad = ctx.createLinearGradient(0, floorY - 2, 0, floorY + 40);
   floorGrad.addColorStop(0, 'rgba(255,255,255,0.06)');
   floorGrad.addColorStop(1, 'rgba(255,255,255,0)');
   ctx.fillStyle = floorGrad;
   ctx.fillRect(0, floorY, W, 40);
-
   ctx.strokeStyle = 'rgba(255,255,255,0.1)';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -415,7 +451,7 @@ function drawFrame(time) {
   const elapsed = Date.now() - state.barStartTime;
   state.barProgress = Math.min(elapsed / state.barDurationMs, 1.0);
 
-  // Beat pulse from timing (metronome visual sync)
+  // Beat pulse sync
   if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 || state.phase === PHASE.RESPONDING) {
     const beatDuration = state.barDurationMs / BEATS_PER_BAR;
     const beatIndex = Math.floor(elapsed / beatDuration);
@@ -424,13 +460,12 @@ function drawFrame(time) {
       state.beatPulse = Math.max(state.beatPulse, 0.6);
     }
   }
-
-  // Decay
   state.beatPulse *= 0.92;
 
   drawTopBar(time);
   drawCharacters(floorY, time);
-  drawBeatLane(time);
+  drawHighway(time);
+  drawHitFeedback();
   drawMessage(time);
   drawCountdown();
   updateParticles();
@@ -453,23 +488,13 @@ function drawGrid(time) {
   const spacing = 60;
   const pulse = state.beatPulse;
   const baseAlpha = 0.015 + pulse * 0.03;
-
   ctx.strokeStyle = `rgba(180, 75, 243, ${baseAlpha})`;
   ctx.lineWidth = 0.5;
-
-  // Vertical lines
   for (let x = 0; x < W; x += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, H);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
   }
-  // Horizontal lines
   for (let y = 0; y < H; y += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(W, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
 }
 
@@ -477,119 +502,65 @@ function drawTopBar(time) {
   const isCaller = state.myId === state.callerId;
   const myPlayer = state.players.get(state.myId);
 
-  // Phase label
   let phaseText = '';
   let phaseColor = '#666';
   switch (state.phase) {
     case PHASE.COUNTDOWN: phaseText = 'GET READY'; phaseColor = '#FFE600'; break;
-    case PHASE.CALLING_BAR1: phaseText = isCaller ? 'SET THE PATTERN' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
-    case PHASE.CALLING_BAR2: phaseText = isCaller ? 'REPEAT TO LOCK' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
-    case PHASE.RESPONDING: phaseText = isCaller ? 'WATCH THEM SWEAT' : 'YOUR TURN!'; phaseColor = '#00FF87'; break;
+    case PHASE.COUNTIN: phaseText = 'COUNT IN'; phaseColor = '#FF6B35'; break;
+    case PHASE.CALLING_BAR1: phaseText = isCaller ? 'FREESTYLE YOUR PATTERN' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
+    case PHASE.CALLING_BAR2: phaseText = isCaller ? 'REPEAT TO LOCK IT IN' : 'WATCH THE CALLER'; phaseColor = '#FF6B35'; break;
+    case PHASE.RESPONDING: phaseText = isCaller ? 'WATCH THEM SWEAT' : 'YOUR TURN — MATCH IT!'; phaseColor = '#00FF87'; break;
     case PHASE.RESULTS: phaseText = 'RESULTS'; phaseColor = '#B24BF3'; break;
     case PHASE.GAME_OVER: phaseText = 'GAME OVER'; phaseColor = '#FF1493'; break;
   }
 
-  // Glow behind phase text
   ctx.shadowColor = phaseColor;
   ctx.shadowBlur = 8;
-  ctx.font = '900 20px "Bebas Neue", Inter, sans-serif';
+  ctx.font = '900 22px "Bebas Neue", Inter, sans-serif';
   ctx.fillStyle = phaseColor;
   ctx.textAlign = 'center';
   ctx.fillText(phaseText, W / 2, 32);
   ctx.shadowBlur = 0;
 
-  // BAR 1 / BAR 2 indicator
   if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) {
     const barLabel = state.phase === PHASE.CALLING_BAR1 ? 'BAR 1' : 'BAR 2';
     ctx.font = '700 12px Inter, sans-serif';
     ctx.fillStyle = '#FF6B35';
+    ctx.textAlign = 'center';
     ctx.fillText(barLabel, W / 2, 48);
   }
 
-  // Round + BPM
   ctx.font = '700 13px Inter, sans-serif';
   ctx.fillStyle = '#555';
   ctx.textAlign = 'left';
   ctx.fillText(`ROUND ${state.round}`, 16, 24);
-
-  // BPM with pulse
   const bpmAlpha = 0.4 + state.beatPulse * 0.6;
   ctx.fillStyle = `rgba(255, 107, 53, ${bpmAlpha})`;
   ctx.fillText(`${state.bpm} BPM`, 16, 42);
 
-  // Player count
   ctx.textAlign = 'right';
   ctx.fillStyle = '#555';
   ctx.fillText(`${state.alivePlayers} ALIVE`, W - 16, 24);
-
-  // Role indicator
   if (myPlayer) {
     ctx.fillStyle = isCaller ? '#FF6B35' : (myPlayer.alive ? '#00FF87' : '#FF3366');
     const roleText = isCaller ? '★ CALLER' : (myPlayer.alive ? 'RESPONDER' : 'ELIMINATED');
     ctx.fillText(roleText, W - 16, 42);
   }
 
-  // Mute indicator
-  ctx.textAlign = 'right';
   ctx.font = '700 10px Inter, sans-serif';
   ctx.fillStyle = '#333';
-  ctx.fillText(isMuted() ? '🔇 M to unmute' : '🔊 M to mute', W - 16, H - 10);
-
-  // Progress bar
-  if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2 || state.phase === PHASE.RESPONDING) {
-    const barW = W - 32;
-    const barH = 4;
-    const barY = 56;
-
-    ctx.fillStyle = 'rgba(255,255,255,0.04)';
-    roundRect(ctx, 16, barY, barW, barH, 2);
-    ctx.fill();
-
-    // Beat markers
-    for (let i = 0; i <= BEATS_PER_BAR; i++) {
-      const x = 16 + (i / BEATS_PER_BAR) * barW;
-      ctx.fillStyle = 'rgba(255,255,255,0.15)';
-      ctx.fillRect(x - 1, barY - 3, 2, barH + 6);
-    }
-
-    // Subdivision markers (smaller)
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      const x = 16 + (i / SUBDIVISIONS) * barW;
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
-      ctx.fillRect(x, barY - 1, 1, barH + 2);
-    }
-
-    // Progress fill with gradient
-    const fillColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
-    const progGrad = ctx.createLinearGradient(16, 0, 16 + barW * state.barProgress, 0);
-    progGrad.addColorStop(0, fillColor + '44');
-    progGrad.addColorStop(1, fillColor);
-    ctx.fillStyle = progGrad;
-    roundRect(ctx, 16, barY, barW * state.barProgress, barH, 2);
-    ctx.fill();
-
-    // Playhead
-    const markerX = 16 + barW * state.barProgress;
-    ctx.shadowColor = fillColor;
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(markerX - 1.5, barY - 5, 3, barH + 10);
-    ctx.shadowBlur = 0;
-  }
+  ctx.fillText(isMuted() ? '🔇 M' : '🔊 M', W - 16, H - 10);
 }
 
 function drawCharacters(floorY, time) {
   const callerPlayer = state.players.get(state.callerId);
   const responders = [];
-
   state.players.forEach((p, id) => {
     if (id !== state.callerId) responders.push({ id, ...p });
   });
 
-  // Draw responders behind
   const responderY = floorY - 10;
   const cols = Math.min(responders.length, 12);
-  const rows = Math.ceil(responders.length / (cols || 1));
   const spacing = Math.min(60, (W - 100) / (cols || 1));
 
   responders.forEach((r, i) => {
@@ -597,20 +568,16 @@ function drawCharacters(floorY, time) {
     const row = Math.floor(i / cols);
     const x = W / 2 + (col - (cols - 1) / 2) * spacing;
     const y = responderY - row * 50;
-    const size = 28;
-    drawCharacter(x, y, size, r.color, r.currentMove, r.alive, time);
+    drawCharacter(x, y, 28, r.color, r.currentMove, r.alive, time);
   });
 
-  // Draw caller in front (larger, centered, with spotlight)
   if (callerPlayer) {
     const callerX = W / 2;
     const callerY = floorY - 20;
-    const callerSize = 65;
+    const callerSize = 60;
 
-    // Spotlight cone behind caller
-    const spotGrad = ctx.createRadialGradient(callerX, callerY - callerSize * 0.3, 0, callerX, callerY - callerSize * 0.3, callerSize * 2);
+    const spotGrad = ctx.createRadialGradient(callerX, callerY - 20, 0, callerX, callerY - 20, callerSize * 2);
     spotGrad.addColorStop(0, callerPlayer.color + '18');
-    spotGrad.addColorStop(0.5, callerPlayer.color + '08');
     spotGrad.addColorStop(1, 'transparent');
     ctx.fillStyle = spotGrad;
     ctx.beginPath();
@@ -619,7 +586,6 @@ function drawCharacters(floorY, time) {
 
     drawCharacter(callerX, callerY, callerSize, callerPlayer.color, callerPlayer.currentMove, true, time, true);
 
-    // Label
     ctx.font = '900 11px "Bebas Neue", Inter, sans-serif';
     ctx.fillStyle = '#FF6B35';
     ctx.textAlign = 'center';
@@ -631,9 +597,7 @@ function drawCharacters(floorY, time) {
 }
 
 function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
-  const alpha = alive ? 1.0 : 0.2;
-  ctx.globalAlpha = alpha;
-
+  ctx.globalAlpha = alive ? 1.0 : 0.2;
   const headR = size * 0.2;
   const bodyW = size * 0.35;
   const bodyH = size * 0.4;
@@ -641,41 +605,27 @@ function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
 
   let headOffsetX = 0, headOffsetY = 0;
   let leftArmAngle = 0, rightArmAngle = 0;
-  let squat = 0;
-  let bodyTilt = 0;
+  let squat = 0, bodyTilt = 0;
 
   switch (move) {
     case MOVE.UP:
-      leftArmAngle = -Math.PI * 0.8;
-      rightArmAngle = Math.PI * 0.8;
-      headOffsetY = -size * 0.08;
-      break;
+      leftArmAngle = -Math.PI * 0.8; rightArmAngle = Math.PI * 0.8;
+      headOffsetY = -size * 0.08; break;
     case MOVE.DOWN:
       squat = size * 0.15;
-      leftArmAngle = -Math.PI * 0.3;
-      rightArmAngle = Math.PI * 0.3;
-      break;
+      leftArmAngle = -Math.PI * 0.3; rightArmAngle = Math.PI * 0.3; break;
     case MOVE.LEFT:
-      headOffsetX = -size * 0.08;
-      bodyTilt = -0.1;
-      leftArmAngle = -Math.PI * 0.6;
-      rightArmAngle = Math.PI * 0.15;
-      break;
+      headOffsetX = -size * 0.08; bodyTilt = -0.1;
+      leftArmAngle = -Math.PI * 0.6; rightArmAngle = Math.PI * 0.15; break;
     case MOVE.RIGHT:
-      headOffsetX = size * 0.08;
-      bodyTilt = 0.1;
-      leftArmAngle = -Math.PI * 0.15;
-      rightArmAngle = Math.PI * 0.6;
-      break;
+      headOffsetX = size * 0.08; bodyTilt = 0.1;
+      leftArmAngle = -Math.PI * 0.15; rightArmAngle = Math.PI * 0.6; break;
   }
 
-  const adjustedY = y + squat;
-
   ctx.save();
-  ctx.translate(x, adjustedY);
+  ctx.translate(x, y + squat);
   ctx.rotate(bodyTilt);
 
-  // Caller glow
   if (isCaller && alive) {
     ctx.shadowColor = color;
     ctx.shadowBlur = 12 + state.beatPulse * 25;
@@ -686,268 +636,317 @@ function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
   ctx.lineCap = 'round';
 
   // Legs
-  ctx.beginPath();
-  ctx.moveTo(-bodyW * 0.3, 0);
-  ctx.lineTo(-bodyW * 0.4, size * 0.3 - squat);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(bodyW * 0.3, 0);
-  ctx.lineTo(bodyW * 0.4, size * 0.3 - squat);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-bodyW * 0.3, 0); ctx.lineTo(-bodyW * 0.4, size * 0.3 - squat); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bodyW * 0.3, 0); ctx.lineTo(bodyW * 0.4, size * 0.3 - squat); ctx.stroke();
 
   // Body
   ctx.fillStyle = color;
-  const bx = -bodyW / 2;
-  const by = -bodyH;
-  roundRect(ctx, bx, by, bodyW, bodyH, size * 0.06);
+  roundRect(ctx, -bodyW / 2, -bodyH, bodyW, bodyH, size * 0.06);
   ctx.fill();
 
   // Arms
-  const shoulderY = by + bodyH * 0.15;
+  const shoulderY = -bodyH + bodyH * 0.15;
   const armLen = size * 0.35;
-
-  ctx.beginPath();
-  ctx.moveTo(-bodyW / 2, shoulderY);
-  ctx.lineTo(-bodyW / 2 + Math.sin(leftArmAngle) * armLen, shoulderY + Math.cos(leftArmAngle) * armLen);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(bodyW / 2, shoulderY);
-  ctx.lineTo(bodyW / 2 + Math.sin(rightArmAngle) * armLen, shoulderY + Math.cos(rightArmAngle) * armLen);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-bodyW / 2, shoulderY);
+  ctx.lineTo(-bodyW / 2 + Math.sin(leftArmAngle) * armLen, shoulderY + Math.cos(leftArmAngle) * armLen); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bodyW / 2, shoulderY);
+  ctx.lineTo(bodyW / 2 + Math.sin(rightArmAngle) * armLen, shoulderY + Math.cos(rightArmAngle) * armLen); ctx.stroke();
 
   // Head
   ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(headOffsetX, by - headR * 0.5 + headOffsetY, headR, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.beginPath(); ctx.arc(headOffsetX, -bodyH - headR * 0.5 + headOffsetY, headR, 0, Math.PI * 2); ctx.fill();
 
   ctx.shadowBlur = 0;
   ctx.restore();
 
-  // Eliminated X
   if (!alive) {
-    ctx.strokeStyle = '#FF3366';
-    ctx.lineWidth = 3;
-    const cx = x;
-    const cy = y - size * 0.25;
+    ctx.strokeStyle = '#FF3366'; ctx.lineWidth = 3;
     const s = size * 0.2;
     ctx.beginPath();
-    ctx.moveTo(cx - s, cy - s);
-    ctx.lineTo(cx + s, cy + s);
-    ctx.moveTo(cx + s, cy - s);
-    ctx.lineTo(cx - s, cy + s);
+    ctx.moveTo(x - s, y - size * 0.25 - s); ctx.lineTo(x + s, y - size * 0.25 + s);
+    ctx.moveTo(x + s, y - size * 0.25 - s); ctx.lineTo(x - s, y - size * 0.25 + s);
     ctx.stroke();
   }
-
   ctx.globalAlpha = 1.0;
 }
 
-function drawBeatLane(time) {
-  const laneH = 150;
-  const laneY = H - laneH - 16;
-  const laneX = 40;
-  const laneW = W - 80;
+// ─── SCROLLING HIGHWAY ─────────────────────────────────────────────
 
-  // Background with rounded edges
-  ctx.fillStyle = 'rgba(10, 10, 25, 0.9)';
-  roundRect(ctx, laneX - 12, laneY - 12, laneW + 24, laneH + 24, 10);
+function drawHighway(time) {
+  const hwyH = 180;
+  const hwyY = H - hwyH - 20;
+  const hwyX = 50;
+  const hwyW = W - 100;
+
+  // Background
+  ctx.fillStyle = 'rgba(10, 10, 25, 0.92)';
+  roundRect(ctx, hwyX - 14, hwyY - 14, hwyW + 28, hwyH + 28, 10);
   ctx.fill();
-  // Border
-  const borderColor = state.phase === PHASE.RESPONDING ? '#00FF8722' : '#FF6B3522';
+
+  const borderColor = state.phase === PHASE.RESPONDING ? '#00FF8720' : '#FF6B3520';
   ctx.strokeStyle = borderColor;
   ctx.lineWidth = 1;
-  roundRect(ctx, laneX - 12, laneY - 12, laneW + 24, laneH + 24, 10);
+  roundRect(ctx, hwyX - 14, hwyY - 14, hwyW + 28, hwyH + 28, 10);
   ctx.stroke();
 
-  const isCaller = state.myId === state.callerId;
-  const slotW = laneW / SUBDIVISIONS;
+  // Judgment line — left side, where you play
+  const judgX = hwyX + 80;
 
-  ctx.font = '700 11px Inter, sans-serif';
-  ctx.textAlign = 'center';
-
+  // Draw based on phase
   if (state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) {
-    const halfW = laneW / 2 - 10;
-    const bar1X = laneX;
-    const bar2X = laneX + laneW / 2 + 10;
-    const sW = halfW / SUBDIVISIONS;
-
-    // Bar 1 label
-    const b1Active = state.phase === PHASE.CALLING_BAR1;
-    ctx.fillStyle = b1Active ? '#FF6B35' : '#333';
-    ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
-    ctx.fillText('BAR 1', bar1X + halfW / 2, laneY + 5);
-
-    // Bar 2 label
-    const b2Active = state.phase === PHASE.CALLING_BAR2;
-    ctx.fillStyle = b2Active ? '#FF6B35' : '#333';
-    ctx.fillText('BAR 2', bar2X + halfW / 2, laneY + 5);
-
-    // Current slot highlight
-    const activeBarX = b1Active ? bar1X : bar2X;
-    const currentSlot = Math.min(Math.floor(state.barProgress * SUBDIVISIONS), SUBDIVISIONS - 1);
-    if (b1Active || b2Active) {
-      ctx.fillStyle = 'rgba(255, 107, 53, 0.06)';
-      ctx.fillRect(activeBarX + currentSlot * sW, laneY + 12, sW - 2, 58);
+    drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, state.phase === PHASE.CALLING_BAR1 ? state.bar1Pattern : state.bar2Pattern, true);
+    // Show bar1 pattern as ghost on top during bar2
+    if (state.phase === PHASE.CALLING_BAR2) {
+      drawGhostPattern(hwyX, hwyY, hwyW, hwyH, judgX, state.bar1Pattern);
     }
-
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      drawSlot(bar1X + i * sW, laneY + 18, sW - 2, 50, state.bar1Pattern[i], !b1Active, b1Active);
-    }
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      drawSlot(bar2X + i * sW, laneY + 18, sW - 2, 50, state.bar2Pattern[i], !b2Active, b2Active);
-    }
-
-    // Divider
-    ctx.strokeStyle = '#222';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(laneX + laneW / 2, laneY - 4);
-    ctx.lineTo(laneX + laneW / 2, laneY + laneH + 4);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Match indicator during bar 2
-    if (b2Active) {
-      let matchCount = 0, totalFilled = 0;
-      for (let i = 0; i < SUBDIVISIONS; i++) {
-        if (state.bar1Pattern[i] !== 0) {
-          totalFilled++;
-          if (state.bar2Pattern[i] === state.bar1Pattern[i]) matchCount++;
-        }
-      }
-      if (totalFilled > 0) {
-        const pct = Math.round(matchCount / totalFilled * 100);
-        ctx.font = '700 11px Inter, sans-serif';
-        ctx.fillStyle = pct === 100 ? '#00FF87' : '#FF6B35';
-        ctx.fillText(`MATCH: ${pct}%`, laneX + laneW / 2, laneY + laneH + 8);
-      }
-    }
-
   } else if (state.phase === PHASE.RESPONDING) {
-    const rowH = 52;
-
-    // Locked pattern (top row)
-    ctx.fillStyle = '#FFE600';
-    ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
-    ctx.fillText('PATTERN TO MATCH', laneX + laneW / 2, laneY + 5);
-
-    const currentSlot = Math.min(Math.floor(state.barProgress * SUBDIVISIONS), SUBDIVISIONS - 1);
-
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      const sx = laneX + i * slotW;
-      // Highlight current slot
-      if (i === currentSlot) {
-        ctx.fillStyle = 'rgba(0, 255, 135, 0.06)';
-        ctx.fillRect(sx, laneY + 10, slotW - 2, rowH + 65);
-      }
-      drawSlot(sx, laneY + 14, slotW - 2, rowH - 6, state.lockedPattern[i], false, true);
-    }
-
-    // My inputs (bottom row)
-    ctx.fillStyle = '#00FF87';
-    ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
-    ctx.fillText('YOUR INPUT', laneX + laneW / 2, laneY + rowH + 16);
-
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      const sx = laneX + i * slotW;
-      const matches = state.myInputs[i] === state.lockedPattern[i] || (state.lockedPattern[i] === 0 && state.myInputs[i] === 0);
-      drawSlot(sx, laneY + rowH + 24, slotW - 2, rowH - 6, state.myInputs[i], false, true, matches);
-    }
-
+    // Show the locked pattern scrolling + player inputs
+    drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, state.lockedPattern, false, state.myInputs);
   } else if (state.phase === PHASE.RESULTS || state.phase === PHASE.GAME_OVER) {
-    ctx.fillStyle = '#B24BF3';
-    ctx.font = '900 12px "Bebas Neue", Inter, sans-serif';
-    ctx.fillText('PATTERN WAS', laneX + laneW / 2, laneY + 5);
-    for (let i = 0; i < SUBDIVISIONS; i++) {
-      drawSlot(laneX + i * slotW, laneY + 18, slotW - 2, 50, state.lockedPattern[i], false, true);
-    }
-
-    ctx.font = '900 18px "Bebas Neue", Inter, sans-serif';
-    ctx.fillStyle = '#aaa';
-    ctx.fillText(state.resultMessage, laneX + laneW / 2, laneY + 95);
+    drawResultsLane(hwyX, hwyY, hwyW, hwyH, judgX);
   }
 
+  // Beat grid lines (vertical, for orientation)
+  const beatDuration = state.barDurationMs / BEATS_PER_BAR;
+  const elapsed = Date.now() - state.barStartTime;
+  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  for (let b = 0; b < BEATS_PER_BAR; b++) {
+    const beatTime = b * beatDuration;
+    const screenX = judgX + (beatTime - elapsed) * pixPerMs;
+    if (screenX > hwyX && screenX < hwyX + hwyW) {
+      ctx.beginPath();
+      ctx.moveTo(screenX, hwyY);
+      ctx.lineTo(screenX, hwyY + hwyH);
+      ctx.stroke();
+    }
+  }
+
+  // Judgment line glow
+  ctx.strokeStyle = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = ctx.strokeStyle;
+  ctx.shadowBlur = 8 + state.beatPulse * 12;
+  ctx.beginPath();
+  ctx.moveTo(judgX, hwyY);
+  ctx.lineTo(judgX, hwyY + hwyH);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // "NOW" label
+  ctx.font = '700 9px Inter, sans-serif';
+  ctx.fillStyle = '#555';
+  ctx.textAlign = 'center';
+  ctx.fillText('NOW', judgX, hwyY + hwyH + 14);
+
+  // Lane labels
+  ctx.font = '700 10px Inter, sans-serif';
+  ctx.textAlign = 'right';
+  const laneH = hwyH / 4;
+  for (let i = 1; i <= 4; i++) {
+    const ly = hwyY + (i - 1) * laneH + laneH / 2;
+    ctx.fillStyle = MOVE_COLORS[i] + '66';
+    ctx.fillText(MOVE_ARROWS[i], hwyX - 4, ly + 4);
+  }
+
+  // Progress bar under highway
+  const progY = hwyY + hwyH + 20;
+  const progW = hwyW;
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  roundRect(ctx, hwyX, progY, progW, 3, 2);
+  ctx.fill();
+  const progColor = state.phase === PHASE.RESPONDING ? '#00FF87' : '#FF6B35';
+  ctx.fillStyle = progColor;
+  roundRect(ctx, hwyX, progY, progW * state.barProgress, 3, 2);
+  ctx.fill();
+
   // Input hint
+  const isCaller = state.myId === state.callerId;
   if (
-    (state.phase === PHASE.RESPONDING && state.myId !== state.callerId) ||
-    ((state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) && state.myId === state.callerId)
+    (state.phase === PHASE.RESPONDING && !isCaller) ||
+    ((state.phase === PHASE.CALLING_BAR1 || state.phase === PHASE.CALLING_BAR2) && isCaller)
   ) {
     ctx.font = '700 10px Inter, sans-serif';
     ctx.fillStyle = '#333';
     ctx.textAlign = 'center';
-    ctx.fillText('▲ ▼ ◄ ► or W A S D', W / 2, H - 6);
+    ctx.fillText('▲ ▼ ◄ ► or W A S D', W / 2, H - 4);
   }
 }
 
-function drawSlot(x, y, w, h, move, isGhost = false, isActive = false, matches = true) {
-  // Background
-  const bgAlpha = isGhost ? 0.02 : 0.05;
-  ctx.fillStyle = `rgba(255,255,255,${bgAlpha})`;
-  roundRect(ctx, x, y, w, h, 5);
+function drawHighwayLane(hwyX, hwyY, hwyW, hwyH, judgX, pattern, isCallerPhase, playerInputs = null) {
+  const elapsed = Date.now() - state.barStartTime;
+  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+  const laneH = hwyH / 4;
+  const noteSize = 24;
+
+  // Lane row backgrounds
+  for (let i = 0; i < 4; i++) {
+    const ly = hwyY + i * laneH;
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'rgba(255,255,255,0.008)';
+    ctx.fillRect(hwyX, ly, hwyW, laneH);
+  }
+
+  // Draw pattern notes — scrolling right to left
+  for (const beat of pattern) {
+    const screenX = judgX + (beat.time - elapsed) * pixPerMs;
+    if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
+
+    const lane = beat.move - 1; // 0-3
+    const ly = hwyY + lane * laneH + laneH / 2;
+    const color = MOVE_COLORS[beat.move];
+
+    // Note diamond/arrow
+    drawNote(screenX, ly, noteSize, color, beat.move, 1.0);
+  }
+
+  // Draw player inputs (during responding phase)
+  if (playerInputs) {
+    for (const beat of playerInputs) {
+      const screenX = judgX + (beat.time - elapsed) * pixPerMs;
+      if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
+
+      const lane = beat.move - 1;
+      const ly = hwyY + lane * laneH + laneH / 2;
+
+      // Check accuracy
+      const rating = getTimingRating(beat.time, beat.move, state.lockedPattern);
+      const ratingColor = rating === 'PERFECT' ? '#FFE600' :
+                          rating === 'GREAT' ? '#00FF87' :
+                          rating === 'GOOD' ? '#00D4FF' : '#FF3366';
+
+      drawNote(screenX, ly, noteSize * 0.8, ratingColor, beat.move, 0.8);
+    }
+  }
+}
+
+function drawGhostPattern(hwyX, hwyY, hwyW, hwyH, judgX, pattern) {
+  const elapsed = Date.now() - state.barStartTime;
+  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+  const laneH = hwyH / 4;
+  const noteSize = 20;
+
+  ctx.globalAlpha = 0.2;
+  for (const beat of pattern) {
+    const screenX = judgX + (beat.time - elapsed) * pixPerMs;
+    if (screenX < hwyX - noteSize || screenX > hwyX + hwyW + noteSize) continue;
+
+    const lane = beat.move - 1;
+    const ly = hwyY + lane * laneH + laneH / 2;
+    const color = MOVE_COLORS[beat.move];
+
+    drawNote(screenX, ly, noteSize, color, beat.move, 1.0);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawNote(x, y, size, color, move, alpha) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+
+  // Diamond shape
+  const half = size / 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y - half);
+  ctx.lineTo(x + half, y);
+  ctx.lineTo(x, y + half);
+  ctx.lineTo(x - half, y);
+  ctx.closePath();
   ctx.fill();
 
-  // Border
-  const borderAlpha = isGhost ? 0.05 : 0.1;
-  ctx.strokeStyle = `rgba(255,255,255,${borderAlpha})`;
-  ctx.lineWidth = 1;
-  roundRect(ctx, x, y, w, h, 5);
-  ctx.stroke();
-
-  if (move === 0) return;
-
-  const arrow = MOVE_ARROWS[move];
-  const color = MOVE_COLORS[move];
-
-  ctx.globalAlpha = isGhost ? 0.25 : 1;
-
-  if (!matches && isActive) {
-    ctx.fillStyle = '#FF3366';
-    // Red bg for wrong
-    ctx.globalAlpha = 0.15;
-    ctx.fillStyle = '#FF3366';
-    roundRect(ctx, x, y, w, h, 5);
-    ctx.fill();
-    ctx.globalAlpha = isGhost ? 0.25 : 1;
-    ctx.fillStyle = '#FF3366';
-  } else {
-    ctx.fillStyle = color;
-  }
-
-  // Glow behind arrow
-  if (isActive && !isGhost) {
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 6;
-  }
-
-  const fontSize = Math.min(w * 0.55, h * 0.45);
-  ctx.font = `900 ${fontSize}px Inter, sans-serif`;
+  // Arrow inside
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#000';
+  ctx.font = `900 ${size * 0.45}px Inter, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(arrow, x + w / 2, y + h / 2 - 2);
+  ctx.fillText(MOVE_ARROWS[move], x, y + 1);
 
-  // Move name
-  ctx.shadowBlur = 0;
-  ctx.font = `700 ${Math.min(8, w * 0.14)}px Inter, sans-serif`;
-  ctx.fillText(MOVE_NAMES[move], x + w / 2, y + h - 7);
-
-  ctx.globalAlpha = 1.0;
   ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha = 1;
+}
+
+function drawResultsLane(hwyX, hwyY, hwyW, hwyH, judgX) {
+  const laneH = hwyH / 4;
+  // Lane backgrounds
+  for (let i = 0; i < 4; i++) {
+    const ly = hwyY + i * laneH;
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'rgba(255,255,255,0.008)';
+    ctx.fillRect(hwyX, ly, hwyW, laneH);
+  }
+
+  // Show locked pattern statically across the highway
+  const pixPerMs = (hwyW - 80) / state.barDurationMs;
+  for (const beat of state.lockedPattern) {
+    const screenX = judgX + beat.time * pixPerMs * 0.8;
+    if (screenX < hwyX || screenX > hwyX + hwyW) continue;
+    const lane = beat.move - 1;
+    const ly = hwyY + lane * laneH + laneH / 2;
+    drawNote(screenX, ly, 22, MOVE_COLORS[beat.move], beat.move, 0.5);
+  }
+
+  // Results text
+  ctx.font = '900 20px "Bebas Neue", Inter, sans-serif';
+  ctx.fillStyle = '#B24BF3';
+  ctx.textAlign = 'center';
+  ctx.fillText(state.resultMessage, hwyX + hwyW / 2, hwyY + hwyH / 2 - 10);
+
+  // Score breakdown
+  if (state.lastResults) {
+    const r = state.lastResults;
+    ctx.font = '700 12px Inter, sans-serif';
+    const parts = [];
+    if (r.perfectCount > 0) parts.push(`PERFECT: ${r.perfectCount}`);
+    if (r.greatCount > 0) parts.push(`GREAT: ${r.greatCount}`);
+    if (r.goodCount > 0) parts.push(`GOOD: ${r.goodCount}`);
+    if (r.missCount > 0) parts.push(`MISS: ${r.missCount}`);
+    ctx.fillStyle = '#777';
+    ctx.fillText(parts.join('  •  '), hwyX + hwyW / 2, hwyY + hwyH / 2 + 14);
+  }
+}
+
+function drawHitFeedback() {
+  for (let i = state.hitFeedback.length - 1; i >= 0; i--) {
+    const fb = state.hitFeedback[i];
+    fb.alpha -= 0.025;
+    fb.y -= 1.5;
+    if (fb.alpha <= 0) {
+      state.hitFeedback.splice(i, 1);
+      continue;
+    }
+    ctx.globalAlpha = fb.alpha;
+    ctx.font = '900 16px "Bebas Neue", Inter, sans-serif';
+    ctx.fillStyle = fb.color;
+    ctx.textAlign = 'center';
+    ctx.shadowColor = fb.color;
+    ctx.shadowBlur = 6;
+    ctx.fillText(fb.rating, 90, H - 230 + fb.y);
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawCountdown() {
-  if (state.phase !== PHASE.COUNTDOWN) return;
+  if (state.phase !== PHASE.COUNTDOWN && state.phase !== PHASE.COUNTIN) return;
 
-  const text = state.countdown > 0 ? String(state.countdown) : 'GO!';
-  const color = state.countdown > 0 ? '#FFE600' : '#00FF87';
-
-  // Pulsing scale
+  let text, color;
+  if (state.phase === PHASE.COUNTIN) {
+    // "1, 2, 3, GO!" — countdown goes 4,3,2,1,0 → show as 1,2,3,GO!
+    const beatNum = 4 - state.countdown;
+    text = beatNum < 4 ? String(beatNum + 1) : 'GO!';
+    color = beatNum < 3 ? '#FF6B35' : '#00FF87';
+  } else {
+    text = state.countdown > 0 ? String(state.countdown) : 'GO!';
+    color = state.countdown > 0 ? '#FFE600' : '#00FF87';
+  }
   const pulse = 1 + state.beatPulse * 0.2;
 
   ctx.save();
-  ctx.translate(W / 2, H / 2 - 40);
+  ctx.translate(W / 2, H / 2 - 60);
   ctx.scale(pulse, pulse);
-
   ctx.font = '900 180px "Bebas Neue", Inter, sans-serif';
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
@@ -955,11 +954,9 @@ function drawCountdown() {
   ctx.shadowColor = color;
   ctx.shadowBlur = 40;
   ctx.fillText(text, 0, 0);
-  // Double render for stronger glow
   ctx.shadowBlur = 80;
   ctx.globalAlpha = 0.3;
   ctx.fillText(text, 0, 0);
-
   ctx.restore();
   ctx.textBaseline = 'alphabetic';
   ctx.shadowBlur = 0;
@@ -969,7 +966,6 @@ function drawCountdown() {
 function drawMessage(time) {
   if (state.messageTimer <= 0) return;
   state.messageTimer--;
-
   const progress = 1 - state.messageTimer / 120;
   const alpha = progress < 0.7 ? 1 : 1 - (progress - 0.7) / 0.3;
   const yOffset = -progress * 30;
@@ -980,7 +976,7 @@ function drawMessage(time) {
   ctx.textAlign = 'center';
   ctx.shadowColor = state.messageColor;
   ctx.shadowBlur = 20;
-  ctx.fillText(state.message, W / 2, H * 0.35 + yOffset);
+  ctx.fillText(state.message, W / 2, H * 0.3 + yOffset);
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 1.0;
 }

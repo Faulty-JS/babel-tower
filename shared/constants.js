@@ -12,10 +12,19 @@ export const STARTING_BPM = 100;
 export const BPM_INCREMENT = 8;      // per round
 export const MAX_BPM = 200;
 export const BEATS_PER_BAR = 4;      // 4/4 time
-export const SUBDIVISIONS = 8;       // 8th notes per bar (2 per beat)
+export const SUBDIVISIONS = 8;       // visual grid (8th notes), used only for display
 export const MIN_PLAYERS_TO_START = 1;
 export const COUNTDOWN_SECONDS = 3;
 export const RESULTS_DURATION_MS = 3000;
+
+// ─── Timing Windows (ms) ────────────────────────────────
+// How close your input must be to the target beat timestamp
+export const TIMING = {
+  PERFECT: 50,   // ±50ms
+  GREAT:   100,  // ±100ms
+  GOOD:    150,  // ±150ms
+  // Beyond GOOD = miss
+};
 
 // ─── Moves ───────────────────────────────────────────────
 // 0 = empty, 1-4 = directional
@@ -39,6 +48,7 @@ export const MOVE_KEYS = {
 export const PHASE = {
   LOBBY: 'lobby',
   COUNTDOWN: 'countdown',
+  COUNTIN: 'countin',           // "1, 2, 3, GO!" at BPM tempo before Bar 1
   CALLING_BAR1: 'calling_bar1',
   CALLING_BAR2: 'calling_bar2',
   RESPONDING: 'responding',
