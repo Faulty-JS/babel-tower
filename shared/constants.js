@@ -13,7 +13,7 @@ export const BPM_INCREMENT = 8;      // per round
 export const MAX_BPM = 200;
 export const BEATS_PER_BAR = 4;      // 4/4 time
 export const SUBDIVISIONS = 8;       // 8th notes per bar (2 per beat)
-export const MIN_PLAYERS_TO_START = 2;
+export const MIN_PLAYERS_TO_START = 1;
 export const COUNTDOWN_SECONDS = 3;
 export const RESULTS_DURATION_MS = 3000;
 

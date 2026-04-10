@@ -117,7 +117,9 @@ export class GameRoom extends Room {
     });
 
     this.onMessage('requestStart', (client) => {
+      console.log(`[GameRoom] requestStart from ${client.sessionId}, phase=${this.state.phase}, alive=${this.getAlivePlayers().length}, min=${MIN_PLAYERS_TO_START}`);
       if (this.state.phase === PHASE.LOBBY && this.getAlivePlayers().length >= MIN_PLAYERS_TO_START) {
+        console.log('[GameRoom] Starting game!');
         this.startGame();
       }
     });
