@@ -28,6 +28,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check endpoint (Railway checks /api/tower)
+app.get('/api/tower', (req, res) => {
+  res.json({ status: 'ok', game: 'BRING IT', uptime: process.uptime() });
+});
+
 app.use(express.static(CLIENT_DIR, {
   maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
   etag: true,
