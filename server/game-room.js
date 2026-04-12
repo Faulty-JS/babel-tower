@@ -16,6 +16,9 @@ import {
   BEATS_PER_BAR, MIN_PLAYERS_TO_START,
   COUNTDOWN_SECONDS, RESULTS_DURATION_MS, PHASE, NEON_COLORS, TIMING,
 } from '../shared/constants.js';
+import {
+  patternsMatch, scorePattern, getBarDurationMs, checkSurvival,
+} from '../shared/scoring.js';
 
 // ─── Schema ─────────────────────────────────────────────────────────
 
@@ -255,13 +258,9 @@ export class GameRoom extends Room {
     }, beatMs);
   }
 
-  getBarDurationMs() {
-    return (BEATS_PER_BAR / this.state.bpm) * 60000;
-  }
-
   startCallingBar1() {
     this.callerBar1 = [];
-    const duration = this.getBarDurationMs();
+    const duration = getBarDurationMs(this.state.bpm);
     this.state.phase = PHASE.CALLING_BAR1;
     this.state.barStartTime = Date.now();
     this.state.barDurationMs = duration;
@@ -279,7 +278,7 @@ export class GameRoom extends Room {
 
   startCallingBar2() {
     this.callerBar2 = [];
-    const duration = this.getBarDurationMs();
+    const duration = getBarDurationMs(this.state.bpm);
     this.state.phase = PHASE.CALLING_BAR2;
     this.state.barStartTime = Date.now();
     this.state.barDurationMs = duration;
@@ -304,10 +303,7 @@ export class GameRoom extends Room {
       return;
     }
 
-    // Compare bar1 and bar2 using timing windows
-    // Each beat in bar1 must have a matching beat in bar2 (same move, within GOOD window)
-    // and vice versa
-    const matched = this.patternsMatch(this.callerBar1, this.callerBar2);
+    const matched = patternsMatch(this.callerBar1, this.callerBar2);
 
     if (matched) {
       // Pattern locked — use bar1 as the canonical pattern
@@ -322,33 +318,9 @@ export class GameRoom extends Room {
     }
   }
 
-  patternsMatch(pattern1, pattern2) {
-    if (pattern1.length !== pattern2.length) return false;
-
-    // Sort both by time
-    const p1 = [...pattern1].sort((a, b) => a.time - b.time);
-    const p2 = [...pattern2].sort((a, b) => a.time - b.time);
-
-    // Each beat in p1 must match a beat in p2 (same move, time within GOOD window)
-    const used = new Set();
-    for (const beat of p1) {
-      let found = false;
-      for (let i = 0; i < p2.length; i++) {
-        if (used.has(i)) continue;
-        if (p2[i].move === beat.move && Math.abs(p2[i].time - beat.time) <= TIMING.GOOD) {
-          used.add(i);
-          found = true;
-          break;
-        }
-      }
-      if (!found) return false;
-    }
-    return true;
-  }
-
   startResponding() {
     this.responderInputs.clear();
-    const duration = this.getBarDurationMs();
+    const duration = getBarDurationMs(this.state.bpm);
     this.state.phase = PHASE.RESPONDING;
     this.state.barStartTime = Date.now();
     this.state.barDurationMs = duration;
@@ -373,13 +345,10 @@ export class GameRoom extends Room {
       if (player.role !== 'responder' || !player.alive) return;
 
       const inputs = this.responderInputs.get(sessionId) || [];
-      const { score, perfectCount, greatCount, goodCount, missCount } = this.scorePattern(this.lockedPattern, inputs);
+      const { score, perfectCount, greatCount, goodCount, missCount } = scorePattern(this.lockedPattern, inputs);
 
-      // Must hit at least half the beats with GOOD or better to survive
       const totalBeats = this.lockedPattern.length;
-      const hitsNeeded = Math.ceil(totalBeats * 0.6);
-      const hits = perfectCount + greatCount + goodCount;
-      const survived = hits >= hitsNeeded;
+      const survived = checkSurvival(totalBeats, perfectCount, greatCount, goodCount);
 
       if (!survived) {
         player.alive = false;
@@ -401,47 +370,6 @@ export class GameRoom extends Room {
 
     this.state.alivePlayers = this.getAlivePlayers().length;
     this.showResults('Round complete!', results);
-  }
-
-  scorePattern(target, inputs) {
-    let perfectCount = 0, greatCount = 0, goodCount = 0, missCount = 0;
-    let score = 0;
-
-    const usedInputs = new Set();
-    const sortedTarget = [...target].sort((a, b) => a.time - b.time);
-
-    for (const beat of sortedTarget) {
-      let bestDelta = Infinity;
-      let bestIdx = -1;
-
-      for (let i = 0; i < inputs.length; i++) {
-        if (usedInputs.has(i)) continue;
-        if (inputs[i].move !== beat.move) continue;
-        const delta = Math.abs(inputs[i].time - beat.time);
-        if (delta < bestDelta) {
-          bestDelta = delta;
-          bestIdx = i;
-        }
-      }
-
-      if (bestIdx !== -1 && bestDelta <= TIMING.GOOD) {
-        usedInputs.add(bestIdx);
-        if (bestDelta <= TIMING.PERFECT) {
-          perfectCount++;
-          score += 3;
-        } else if (bestDelta <= TIMING.GREAT) {
-          greatCount++;
-          score += 2;
-        } else {
-          goodCount++;
-          score += 1;
-        }
-      } else {
-        missCount++;
-      }
-    }
-
-    return { score, perfectCount, greatCount, goodCount, missCount };
   }
 
   showResults(message, results = []) {

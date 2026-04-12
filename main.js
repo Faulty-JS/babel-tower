@@ -11,6 +11,10 @@ import {
 } from './shared/constants.js';
 
 import {
+  getTimingRating, snapToGrid as snapToGridFn,
+} from './shared/scoring.js';
+
+import {
   initAudio, playInputSound, playMetronomeTick,
   playPatternLocked, playCallerFailed, playSurvived,
   playEliminated, playCountdownBeep, playCountInBeat, playVictory,
@@ -332,19 +336,7 @@ document.addEventListener('keydown', (e) => {
   state.beatPulse = 1.0;
 });
 
-function getTimingRating(time, move, pattern) {
-  let bestDelta = Infinity;
-  for (const beat of pattern) {
-    if (beat.move === move) {
-      const delta = Math.abs(beat.time - time);
-      if (delta < bestDelta) bestDelta = delta;
-    }
-  }
-  if (bestDelta <= TIMING.PERFECT) return 'PERFECT';
-  if (bestDelta <= TIMING.GREAT) return 'GREAT';
-  if (bestDelta <= TIMING.GOOD) return 'GOOD';
-  return 'MISS';
-}
+// getTimingRating imported from shared/scoring.js
 
 function addHitFeedback(rating, color) {
   const ratingColors = {
@@ -752,11 +744,7 @@ function drawCharacter(x, y, size, color, move, alive, time, isCaller = false) {
 // ─── TIMELINE (static boxes + sweeping playhead) ───────────────────
 
 function snapToGrid(timeMs) {
-  // Snap to nearest 8th note for display position
-  const subdivMs = state.barDurationMs / SUBDIVISIONS;
-  const snapped = Math.round(timeMs / subdivMs) * subdivMs;
-  // Clamp to valid range (don't snap past the last slot)
-  return Math.max(0, Math.min(snapped, state.barDurationMs - subdivMs));
+  return snapToGridFn(timeMs, state.barDurationMs, SUBDIVISIONS);
 }
 
 function timeToX(timeMs, laneX, laneW) {
